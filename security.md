@@ -2,7 +2,7 @@
 
 ## Dependency policy
 
-`codexbox` currently uses only the Go standard library. Keep it dependency-free
+`agentwisp` currently uses only the Go standard library. Keep it dependency-free
 unless an external module is necessary and has been explicitly reviewed.
 
 Before adding or updating any Go module:
@@ -53,7 +53,8 @@ was introduced.
 
 ## Container safety
 
-- The TUI only displays containers with the `codex-work-` prefix.
+- The TUI displays `agentwisp-work-` containers and legacy `codex-work-`
+  containers retained for migration compatibility.
 - A workspace mount gives the container access to host files in that directory.
   Do not mount sensitive parent directories or open untrusted projects.
 - Container images are dependencies. For security-sensitive or reproducible use,

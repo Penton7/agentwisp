@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	containerPrefix = "codex-work-"
-	workspaceLabel  = "dev.codexbox.workspace"
-	managedLabel    = "dev.codexbox.managed"
+	containerPrefix       = "agentwisp-work-"
+	workspaceLabel        = "dev.agentwisp.workspace"
+	managedLabel          = "dev.agentwisp.managed"
+	legacyContainerPrefix = "codex-work-"
+	legacyWorkspaceLabel  = "dev.codexbox.workspace"
 )
 
 type workspace struct {
@@ -48,7 +50,7 @@ const (
 
 func main() {
 	if err := execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "codexbox:", err)
+		fmt.Fprintln(os.Stderr, "agentwisp:", err)
 		os.Exit(1)
 	}
 }
@@ -64,6 +66,7 @@ func execute(args []string, in io.Reader, out, errOut io.Writer) error {
 		project = "workspace"
 	}
 	name := containerPrefix + project
+	legacyName := legacyContainerPrefix + project
 
 	command := "list"
 	if len(args) > 0 {
@@ -72,15 +75,31 @@ func execute(args []string, in io.Reader, out, errOut io.Writer) error {
 
 	switch command {
 	case "add", "start", "run":
-		return openWorkspace(name, cwd, out, errOut)
+		resolved, err := resolveContainerName(name, legacyName)
+		if err != nil {
+			return err
+		}
+		return openWorkspace(resolved, cwd, out, errOut)
 	case "list", "ls", ".":
 		return chooseWorkspace(in, out, errOut)
 	case "shell":
-		return execInteractive(errOut, "container", "exec", "-it", name, "bash")
+		resolved, err := resolveContainerName(name, legacyName)
+		if err != nil {
+			return err
+		}
+		return execInteractive(errOut, "container", "exec", "-it", resolved, "bash")
 	case "stop":
-		return execInteractive(errOut, "container", "stop", name)
+		resolved, err := resolveContainerName(name, legacyName)
+		if err != nil {
+			return err
+		}
+		return execInteractive(errOut, "container", "stop", resolved)
 	case "rm":
-		return execInteractive(errOut, "container", "rm", name)
+		resolved, err := resolveContainerName(name, legacyName)
+		if err != nil {
+			return err
+		}
+		return execInteractive(errOut, "container", "rm", resolved)
 	case "help", "-h", "--help":
 		printUsage(out)
 		return nil
@@ -260,7 +279,7 @@ func chooseWorkspaceByNumber(in io.Reader, out, errOut io.Writer) error {
 		return err
 	}
 	if len(workspaces) == 0 {
-		fmt.Fprintln(out, "No codexbox workspaces found.")
+		fmt.Fprintln(out, "No agentwisp workspaces found.")
 		return nil
 	}
 
@@ -398,7 +417,7 @@ func renderTitleBar(screen *strings.Builder, workspaces []workspace, width int) 
 	}
 	stopped := len(workspaces) - running
 
-	title := " CODEXBOX  WORKSPACES"
+	title := " AGENTWISP  WORKSPACES"
 	summary := fmt.Sprintf("%d total  %d active  %d stopped ", len(workspaces), running, stopped)
 	space := width - len([]rune(title)) - len([]rune(summary))
 	if space < 1 {
@@ -660,8 +679,8 @@ func truncateCell(value string, width int) string {
 func renderEmptyTUI(out io.Writer) {
 	fmt.Fprint(out,
 		"\x1b[H\x1b[2J",
-		"\x1b[1;36mCODEXBOX WORKSPACES\x1b[0m\n\n",
-		"No codexbox workspaces found.\n\n",
+		"\x1b[1;36mAGENTWISP WORKSPACES\x1b[0m\n\n",
+		"No agentwisp workspaces found.\n\n",
 		"\x1b[2mPress any key to close\x1b[0m",
 	)
 }
@@ -683,7 +702,8 @@ func listWorkspaces() ([]workspace, error) {
 
 	workspaces := make([]workspace, 0, len(all))
 	for _, name := range all {
-		if !strings.HasPrefix(name, containerPrefix) {
+		if !strings.HasPrefix(name, containerPrefix) &&
+			!strings.HasPrefix(name, legacyContainerPrefix) {
 			continue
 		}
 
@@ -752,6 +772,9 @@ func workspacePathFromInspect(data []byte) (string, error) {
 	}
 
 	if path := findLabel(value, workspaceLabel); path != "" {
+		return path, nil
+	}
+	if path := findLabel(value, legacyWorkspaceLabel); path != "" {
 		return path, nil
 	}
 	return findWorkspaceMount(value), nil
@@ -850,6 +873,25 @@ func containerExists(name string) (bool, error) {
 	return false, err
 }
 
+func resolveContainerName(preferred, legacy string) (string, error) {
+	exists, err := containerExists(preferred)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return preferred, nil
+	}
+
+	legacyExists, err := containerExists(legacy)
+	if err != nil {
+		return "", err
+	}
+	if legacyExists {
+		return legacy, nil
+	}
+	return preferred, nil
+}
+
 func containerRunning(name string) (bool, error) {
 	ids, err := containerIDs(false)
 	if err != nil {
@@ -897,16 +939,16 @@ func execInteractive(errOut io.Writer, name string, args ...string) error {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "codexbox - manage development workspaces")
+	fmt.Fprintln(out, "agentwisp - manage development workspaces")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  codexbox              Open the workspace manager")
-	fmt.Fprintln(out, "  codexbox add          Add/start the current directory and enter it")
-	fmt.Fprintln(out, "  codexbox start        Start the current directory and enter it")
-	fmt.Fprintln(out, "  codexbox shell        Enter the current directory workspace")
-	fmt.Fprintln(out, "  codexbox stop         Stop the current directory workspace")
-	fmt.Fprintln(out, "  codexbox rm           Remove the current directory workspace")
-	fmt.Fprintln(out, "  codexbox help         Show this help")
+	fmt.Fprintln(out, "  agentwisp              Open the workspace manager")
+	fmt.Fprintln(out, "  agentwisp add          Add/start the current directory and enter it")
+	fmt.Fprintln(out, "  agentwisp start        Start the current directory and enter it")
+	fmt.Fprintln(out, "  agentwisp shell        Enter the current directory workspace")
+	fmt.Fprintln(out, "  agentwisp stop         Stop the current directory workspace")
+	fmt.Fprintln(out, "  agentwisp rm           Remove the current directory workspace")
+	fmt.Fprintln(out, "  agentwisp help         Show this help")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Aliases:")
 	fmt.Fprintln(out, "  run = start, list/ls/. = workspace manager")

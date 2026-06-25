@@ -1,19 +1,19 @@
-# Codexbox Development Guide
+# AgentWisp Development Guide
 
 This file defines the working rules for developers and coding agents modifying
 this repository.
 
 ## Project goal
 
-Codexbox is a small macOS CLI for managing isolated development workspaces with
+AgentWisp is a small macOS CLI for managing isolated development workspaces with
 Apple's `container` command.
 
 The intended workflow is:
 
-1. Run `codexbox add` inside a project directory.
-2. Codexbox creates or starts a container and mounts that directory at
+1. Run `agentwisp add` inside a project directory.
+2. AgentWisp creates or starts a container and mounts that directory at
    `/workspace`.
-3. Run `codexbox` from anywhere to open the workspace manager.
+3. Run `agentwisp` from anywhere to open the workspace manager.
 4. Start, attach to, stop, or inspect registered workspaces from the TUI.
 
 Keep the tool fast, predictable, and easy to distribute as one binary.
@@ -27,23 +27,24 @@ Keep the tool fast, predictable, and easy to distribute as one binary.
 
 Managed containers use:
 
-- name prefix: `codex-work-`;
-- label `dev.codexbox.managed=true`;
-- label `dev.codexbox.workspace=<host-path>`;
+- name prefix: `agentwisp-work-`;
+- label `dev.agentwisp.managed=true`;
+- label `dev.agentwisp.workspace=<host-path>`;
 - host project mounted at `/workspace`;
 - working directory `/workspace`;
 - image `docker.io/library/node:22-bookworm`.
 
-Older containers without labels must remain discoverable through their
+Older `codex-work-*` containers and `dev.codexbox.*` labels must remain
+discoverable. Containers without labels must remain discoverable through their
 `/workspace` bind mount.
 
 ## Required behavior
 
-- `codexbox` opens the TUI workspace manager.
-- `codexbox add`, `start`, and `run` create/start the current workspace and enter
+- `agentwisp` opens the TUI workspace manager.
+- `agentwisp add`, `start`, and `run` create/start the current workspace and enter
   it.
-- `codexbox shell`, `stop`, and `rm` operate on the current directory workspace.
-- `codexbox help` documents commands, aliases, and TUI controls.
+- `agentwisp shell`, `stop`, and `rm` operate on the current directory workspace.
+- `agentwisp help` documents commands, aliases, and TUI controls.
 - `list`, `ls`, and `.` remain manager aliases unless intentionally deprecated.
 - Enter starts a stopped workspace or attaches to a running one.
 - `S` stops the selected running workspace without closing the TUI.
@@ -79,7 +80,7 @@ terminal output:
   available.
 - Treat `container inspect` output as untrusted data.
 - Never execute values obtained from labels, paths, or inspect output.
-- Preserve compatibility with previously created Codexbox containers.
+- Preserve compatibility with pre-rename Codexbox containers.
 - Do not modify unrelated user files or replace the existing binary during tests.
 
 ## Dependency policy
@@ -103,7 +104,7 @@ Run before handing off a change:
 gofmt -w main.go main_test.go
 go vet ./...
 go test ./...
-go build -o codexbox .
+go build -o agentwisp .
 ```
 
 After dependency changes also run:
@@ -127,23 +128,23 @@ For TUI changes, manually verify at least:
 Build locally first:
 
 ```sh
-go build -o codexbox .
-./codexbox help
-./codexbox
+go build -o agentwisp .
+./agentwisp help
+./agentwisp
 ```
 
 Install only after verification:
 
 ```sh
-sudo install -m 755 ./codexbox /usr/local/bin/codexbox
+sudo install -m 755 ./agentwisp /usr/local/bin/agentwisp
 rehash
 ```
 
 If the installed binary behaves differently, compare paths and checksums:
 
 ```sh
-type -a codexbox
-shasum -a 256 ./codexbox /usr/local/bin/codexbox
+type -a agentwisp
+shasum -a 256 ./agentwisp /usr/local/bin/agentwisp
 ```
 
 ## Good next improvements

@@ -12,7 +12,7 @@ func TestWorkspacePathFromInspectLabel(t *testing.T) {
 		{
 			"configuration": {
 				"labels": {
-					"dev.codexbox.workspace": "/Users/me/project"
+					"dev.agentwisp.workspace": "/Users/me/project"
 				}
 			}
 		}
@@ -24,6 +24,34 @@ func TestWorkspacePathFromInspectLabel(t *testing.T) {
 	}
 	if got != "/Users/me/project" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestWorkspacePathFromLegacyInspectLabel(t *testing.T) {
+	data := []byte(`{
+		"labels": {
+			"dev.codexbox.workspace": "/Users/me/legacy-project"
+		}
+	}`)
+
+	got, err := workspacePathFromInspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/Users/me/legacy-project" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestAgentWispIdentifiers(t *testing.T) {
+	if containerPrefix != "agentwisp-work-" {
+		t.Fatalf("container prefix: %q", containerPrefix)
+	}
+	if workspaceLabel != "dev.agentwisp.workspace" {
+		t.Fatalf("workspace label: %q", workspaceLabel)
+	}
+	if managedLabel != "dev.agentwisp.managed" {
+		t.Fatalf("managed label: %q", managedLabel)
 	}
 }
 
@@ -62,8 +90,8 @@ func TestWorkspacePathFromInspectVolumeString(t *testing.T) {
 func TestPrintWorkspaces(t *testing.T) {
 	var out bytes.Buffer
 	printWorkspaces(&out, []workspace{
-		{Name: "codex-work-api", Path: "/code/api", Running: true},
-		{Name: "codex-work-web", Path: "/code/web", Running: false},
+		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
+		{Name: "agentwisp-work-web", Path: "/code/web", Running: false},
 	})
 
 	text := out.String()
@@ -103,12 +131,12 @@ func TestReadTUIKey(t *testing.T) {
 func TestRenderTUI(t *testing.T) {
 	var out bytes.Buffer
 	renderTUI(&out, []workspace{
-		{Name: "codex-work-api", Path: "/code/api", Running: true},
-		{Name: "codex-work-web", Path: "/code/web", Running: false},
+		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
+		{Name: "agentwisp-work-web", Path: "/code/web", Running: false},
 	}, 1, "", 100)
 
 	text := out.String()
-	for _, expected := range []string{"CODEXBOX", "WORKSPACE", "STATUS", "ACTION", "VOLUME", "codex-work-api", "/code/api", "RUNNING", "STOPPED", "ATTACH", "START", "Open"} {
+	for _, expected := range []string{"AGENTWISP", "WORKSPACE", "STATUS", "ACTION", "VOLUME", "agentwisp-work-api", "/code/api", "RUNNING", "STOPPED", "ATTACH", "START", "Open"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("output does not contain %q:\n%s", expected, text)
 		}
@@ -118,7 +146,7 @@ func TestRenderTUI(t *testing.T) {
 func TestRenderTUICompact(t *testing.T) {
 	var out bytes.Buffer
 	renderTUI(&out, []workspace{
-		{Name: "codex-work-api", Path: "/a/very/long/path/to/the/workspace", Running: true},
+		{Name: "agentwisp-work-api", Path: "/a/very/long/path/to/the/workspace", Running: true},
 	}, 0, "", 40)
 
 	for _, line := range strings.Split(out.String(), "\n") {
@@ -134,7 +162,7 @@ func TestRenderTUIKeepsLastColumnEmpty(t *testing.T) {
 	var out bytes.Buffer
 	renderTUI(&out, []workspace{
 		{
-			Name:    "codex-work-project-with-a-long-name",
+			Name:    "agentwisp-work-project-with-a-long-name",
 			Path:    "/Users/example/projects/a-workspace-with-a-long-name",
 			Running: true,
 		},
@@ -150,16 +178,16 @@ func TestRenderTUIKeepsLastColumnEmpty(t *testing.T) {
 func TestDesiredNameWidth(t *testing.T) {
 	got := desiredNameWidth([]workspace{
 		{Name: "short"},
-		{Name: "codex-work-longer-project"},
+		{Name: "agentwisp-work-longer-project"},
 	})
-	if got != len("codex-work-longer-project") {
+	if got != len("agentwisp-work-longer-project") {
 		t.Fatalf("got %d", got)
 	}
 }
 
 func TestAdaptivePanelWidth(t *testing.T) {
 	workspaces := []workspace{
-		{Name: "codex-work-api", Path: "/code/api"},
+		{Name: "agentwisp-work-api", Path: "/code/api"},
 	}
 
 	if got := adaptivePanelWidth(workspaces, 120); got != 120 {
@@ -173,7 +201,7 @@ func TestAdaptivePanelWidth(t *testing.T) {
 func TestAdaptivePanelGivesVolumeMoreSpace(t *testing.T) {
 	workspaces := []workspace{
 		{
-			Name: "codex-work-api",
+			Name: "agentwisp-work-api",
 			Path: "/Users/example/projects/company/platform/services/api",
 		},
 	}
@@ -192,7 +220,7 @@ func TestRenderTitleBar(t *testing.T) {
 	}, 60)
 
 	text := out.String()
-	for _, expected := range []string{"CODEXBOX", "2 total", "1 active", "1 stopped"} {
+	for _, expected := range []string{"AGENTWISP", "2 total", "1 active", "1 stopped"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("title does not contain %q: %s", expected, text)
 		}
@@ -202,8 +230,8 @@ func TestRenderTitleBar(t *testing.T) {
 func TestWorkspaceListRowsHaveEqualWidth(t *testing.T) {
 	var out strings.Builder
 	renderWorkspaceList(&out, []workspace{
-		{Name: "codex-work-api", Path: "/code/api", Running: true},
-		{Name: "codex-work-much-longer-name", Path: "/code/web", Running: false},
+		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
+		{Name: "agentwisp-work-much-longer-name", Path: "/code/web", Running: false},
 	}, 1, 52)
 
 	lines := strings.Split(out.String(), "\n")
@@ -217,11 +245,11 @@ func TestWorkspaceListRowsHaveEqualWidth(t *testing.T) {
 
 func TestWorkspaceIndex(t *testing.T) {
 	workspaces := []workspace{
-		{Name: "codex-work-api"},
-		{Name: "codex-work-web"},
+		{Name: "agentwisp-work-api"},
+		{Name: "agentwisp-work-web"},
 	}
 
-	if got := workspaceIndex(workspaces, "codex-work-web"); got != 1 {
+	if got := workspaceIndex(workspaces, "agentwisp-work-web"); got != 1 {
 		t.Fatalf("got %d, want 1", got)
 	}
 	if got := workspaceIndex(workspaces, "missing"); got != 1 {
@@ -244,9 +272,9 @@ func TestPrintUsage(t *testing.T) {
 
 	text := out.String()
 	for _, expected := range []string{
-		"codexbox add",
-		"codexbox start",
-		"codexbox help",
+		"agentwisp add",
+		"agentwisp start",
+		"agentwisp help",
 		"Workspace manager keys",
 		"Stop selected workspace",
 	} {
@@ -259,7 +287,7 @@ func TestPrintUsage(t *testing.T) {
 func TestNarrowWorkspaceListShowsSelectedVolume(t *testing.T) {
 	var out strings.Builder
 	renderWorkspaceList(&out, []workspace{
-		{Name: "codex-work-api", Path: "/code/api", Running: true},
+		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 	}, 0, 32)
 
 	text := out.String()

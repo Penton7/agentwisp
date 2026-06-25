@@ -1,6 +1,6 @@
-# Codexbox
+# AgentWisp
 
-Codexbox is a lightweight macOS CLI for creating and managing isolated
+AgentWisp is a lightweight macOS CLI for creating and managing isolated
 development workspaces with Apple's `container` command.
 
 Each project directory gets its own container. The host directory is mounted at
@@ -9,15 +9,15 @@ remain on the host.
 
 ## Concept
 
-Codexbox provides two workflows:
+AgentWisp provides two workflows:
 
-- Run `codexbox add` inside a project to create or start its workspace.
-- Run `codexbox` from anywhere to manage all Codexbox workspaces in an
+- Run `agentwisp add` inside a project to create or start its workspace.
+- Run `agentwisp` from anywhere to manage all AgentWisp workspaces in an
   interactive terminal UI.
 
-Containers are identified by the `codex-work-` prefix and store the original
-workspace path in a container label. Existing containers created by older
-Codexbox versions are discovered through their `/workspace` mount.
+Containers are identified by the `agentwisp-work-` prefix and store the original
+workspace path in a container label. Legacy `codex-work-*` containers created
+before the AgentWisp rename remain discoverable and manageable.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ Codexbox versions are discovered through their `/workspace` mount.
 ```sh
 gofmt -w main.go main_test.go
 go test ./...
-go build -o codexbox .
+go build -o agentwisp .
 ```
 
 ## Install
@@ -39,44 +39,53 @@ go build -o codexbox .
 Install the binary so it is available from any directory:
 
 ```sh
-sudo install -m 755 ./codexbox /usr/local/bin/codexbox
+sudo install -m 755 ./agentwisp /usr/local/bin/agentwisp
 rehash
 ```
 
 Verify the installed command:
 
 ```sh
-command -v codexbox
-codexbox help
+command -v agentwisp
+agentwisp help
 ```
+
+If upgrading from the old `codexbox` name, the previous binary can be removed
+after AgentWisp is installed:
+
+```sh
+sudo rm -f /usr/local/bin/codexbox
+```
+
+Existing `codex-work-*` workspace containers do not need to be recreated.
 
 ## Usage
 
 Open the workspace manager:
 
 ```sh
-codexbox
+agentwisp
 ```
 
 Add the current directory as a workspace, start it, and enter its shell:
 
 ```sh
-codexbox add
+agentwisp add
 ```
 
 Start or enter the current directory workspace:
 
 ```sh
-codexbox start
+agentwisp start
 ```
 
 Other commands:
 
 ```text
-codexbox shell    Enter the current directory workspace
-codexbox stop     Stop the current directory workspace
-codexbox rm       Remove the current directory workspace
-codexbox help     Show CLI and TUI help
+agentwisp shell    Enter the current directory workspace
+agentwisp stop     Stop the current directory workspace
+agentwisp rm       Remove the current directory workspace
+agentwisp help     Show CLI and TUI help
 ```
 
 Compatibility aliases:
@@ -117,30 +126,33 @@ Image:       docker.io/library/node:22-bookworm
 Mount:       <host-project>:/workspace
 Workdir:     /workspace
 Shell:       bash
-Name:        codex-work-<sanitized-directory-name>
+Name:        agentwisp-work-<sanitized-directory-name>
 ```
 
 Labels:
 
 ```text
-dev.codexbox.managed=true
-dev.codexbox.workspace=<host-project>
+dev.agentwisp.managed=true
+dev.agentwisp.workspace=<host-project>
 ```
+
+Legacy labels under `dev.codexbox.*` are read for migration compatibility but
+are not written to new containers.
 
 ## Example workflow
 
 ```sh
 cd ~/projects/my-api
-codexbox add
+agentwisp add
 ```
 
 Later, from any directory:
 
 ```sh
-codexbox
+agentwisp
 ```
 
-Select `codex-work-my-api` and press Enter to attach. If it is stopped, Codexbox
+Select `agentwisp-work-my-api` and press Enter to attach. If it is stopped, AgentWisp
 starts it first.
 
 ## Security
@@ -163,7 +175,7 @@ Before submitting changes:
 gofmt -w main.go main_test.go
 go vet ./...
 go test ./...
-go build -o codexbox .
+go build -o agentwisp .
 ```
 
 ## Current limitations
@@ -173,5 +185,5 @@ go build -o codexbox .
 - Workspace identity is based on the sanitized directory name, so directories
   with the same basename can collide.
 - The TUI supports starting, attaching, stopping, and refreshing, but removal is
-  currently available only through `codexbox rm` in the project directory.
+  currently available only through `agentwisp rm` in the project directory.
 - Container image tags are not yet pinned to a digest.
