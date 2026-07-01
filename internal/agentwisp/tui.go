@@ -54,7 +54,7 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 	readingKey := false
 
 	for {
-		renderTUI(out, workspaces, selected, message, width)
+		renderTUIWithMonitorStatus(out, workspaces, selected, message, width, monitorTUIStatus(workspaces, selected))
 		message = ""
 
 		if !readingKey {
@@ -118,20 +118,26 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 					continue
 				}
 
-				renderTUI(out, workspaces, selected, "Stopping "+chosen.Name+"...", width)
+				renderTUIWithMonitorStatus(out, workspaces, selected, "Stopping "+chosen.Name+"...", width, monitorTUIStatus(workspaces, selected))
 				if stopErr := stopWorkspace(chosen.Name); stopErr != nil {
 					message = "Stop failed: " + stopErr.Error()
 					continue
 				}
+				proxyMessage := ""
+				if proxyErr := disableMonitor(chosen.Name); proxyErr != nil {
+					proxyMessage = "; proxy stop failed: " + proxyErr.Error()
+				} else {
+					proxyMessage = "; proxy stopped"
+				}
 
 				refreshed, refreshErr := listWorkspaces()
 				if refreshErr != nil {
-					message = "Stopped, but refresh failed: " + refreshErr.Error()
+					message = "Stopped" + proxyMessage + ", but refresh failed: " + refreshErr.Error()
 					continue
 				}
 				workspaces = refreshed
 				selected = workspaceIndex(workspaces, chosen.Name)
-				message = chosen.Name + " stopped"
+				message = chosen.Name + " stopped" + proxyMessage
 			case keyEnter:
 				chosen := workspaces[selected]
 				term.restore()
@@ -161,6 +167,10 @@ func chooseWorkspaceByNumber(in io.Reader, out, errOut io.Writer) error {
 }
 
 func renderTUI(out io.Writer, workspaces []workspace, selected int, message string, width int) {
+	renderTUIWithMonitorStatus(out, workspaces, selected, message, width, "")
+}
+
+func renderTUIWithMonitorStatus(out io.Writer, workspaces []workspace, selected int, message string, width int, monitorStatus string) {
 	if width < 20 {
 		width = 20
 	}
@@ -176,6 +186,11 @@ func renderTUI(out io.Writer, workspaces []workspace, selected int, message stri
 
 	renderWorkspaceList(&screen, workspaces, selected, panelWidth)
 
+	if monitorStatus != "" {
+		screen.WriteString("\n\x1b[38;5;250m")
+		screen.WriteString(truncateCell(monitorStatus, panelWidth))
+		screen.WriteString("\x1b[0m")
+	}
 	if message != "" {
 		screen.WriteString("\n\x1b[33m")
 		screen.WriteString(truncateCell(message, panelWidth))
