@@ -85,6 +85,11 @@ Other commands:
 agentwisp shell    Enter the current directory workspace
 agentwisp stop     Stop the current directory workspace
 agentwisp rm       Remove the current directory workspace
+agentwisp monitor  Show traffic monitor status for the current workspace
+agentwisp monitor on
+agentwisp monitor off
+agentwisp monitor logs
+agentwisp monitor clear
 agentwisp help     Show CLI and TUI help
 ```
 
@@ -102,14 +107,15 @@ The TUI displays:
 - workspace/container name;
 - current status;
 - Enter action (`ATTACH` or `START`);
-- host volume path.
+- host volume path;
+- selected workspace proxy status when the traffic monitor is enabled.
 
 Controls:
 
 ```text
 Up/Down or J/K    Move selection
 Enter             Attach to running or start stopped workspace
-S                 Stop selected workspace
+S                 Stop selected workspace and its traffic monitor proxy
 R                 Refresh statuses
 Q or Esc          Quit
 ```
@@ -163,6 +169,85 @@ requirements and container security guidance are documented in
 
 A mounted workspace is accessible from inside its container. Do not mount
 sensitive parent directories or use untrusted projects without reviewing them.
+
+## Experimental traffic monitor
+
+AgentWisp can run an opt-in metadata-only HTTP(S) proxy for a workspace:
+
+```sh
+agentwisp monitor on
+agentwisp shell
+```
+
+When enabled, AgentWisp starts a local proxy on the host and enters the
+workspace with `HTTP_PROXY`, `HTTPS_PROXY`, and matching lowercase variables set.
+The proxy URL includes a per-workspace random token and the proxy requires that
+token through `Proxy-Authorization`.
+Logs are stored under:
+
+```text
+~/.agentwisp/workspaces/<workspace>/traffic.ndjson
+```
+
+View or clear logs:
+
+```sh
+agentwisp monitor logs
+agentwisp monitor clear
+agentwisp monitor off
+```
+
+Private LAN destinations are blocked by default to prevent the workspace from
+using the monitor proxy to reach local network devices or services through the
+host laptop. If you explicitly need LAN access through the proxy:
+
+```sh
+agentwisp monitor on --allow-private
+```
+
+The monitor logs metadata only:
+
+- timestamp;
+- workspace;
+- scheme;
+- host;
+- port;
+- method;
+- byte counts;
+- allow/deny result.
+
+It does not log headers, cookies, Authorization values, request bodies, response
+bodies, or full URLs by default.
+
+For Apple `container`, AgentWisp tries to detect the host gateway from inside
+the container with `ip route show default`. If that does not work on your setup,
+override it:
+
+```sh
+AGENTWISP_PROXY_HOST=<host-gateway-name-or-ip> agentwisp shell
+```
+
+By default, the host proxy listens on `0.0.0.0` so Apple containers can reach it.
+If you know the specific host-side interface address that containers can reach,
+bind only to that address:
+
+```sh
+AGENTWISP_PROXY_LISTEN_HOST=<host-interface-ip> agentwisp monitor on
+```
+
+Do not use Docker-specific hostnames here; AgentWisp is using Apple's
+`container` CLI.
+
+This monitor is experimental. It only sees traffic from tools that honor
+`HTTP_PROXY` / `HTTPS_PROXY`.
+
+Security defaults:
+
+- proxy authentication is required;
+- private LAN destinations are blocked unless `--allow-private` is used;
+- loopback, link-local, multicast, and unspecified destinations are always blocked;
+- HTTP `CONNECT` is restricted to port `443`;
+- proxy process health/shutdown uses authenticated local control requests.
 
 ## Development
 

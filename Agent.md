@@ -55,8 +55,11 @@ discoverable. Containers without labels must remain discoverable through their
 - `agentwisp help` documents commands, aliases, and TUI controls.
 - `list`, `ls`, and `.` remain manager aliases unless intentionally deprecated.
 - Enter starts a stopped workspace or attaches to a running one.
-- `S` stops the selected running workspace without closing the TUI.
+- `S` stops the selected running workspace and disables its traffic monitor proxy
+  without closing the TUI.
 - `R` refreshes container state.
+- If the traffic monitor is configured for the selected workspace, the TUI shows
+  proxy health, PID, port, private LAN policy, and log path.
 
 ## Terminal and TUI invariants
 

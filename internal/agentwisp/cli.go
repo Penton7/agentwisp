@@ -26,6 +26,11 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 	}
 
 	switch command {
+	case "internal-monitor-proxy":
+		if os.Getenv("AGENTWISP_INTERNAL_MONITOR_PROXY") != "1" {
+			return fmt.Errorf("internal command")
+		}
+		return runMonitorProxyCommand(args[1:], out, errOut)
 	case "add", "start", "run":
 		resolved, err := resolveContainerName(name, legacyName)
 		if err != nil {
@@ -39,7 +44,7 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return execInteractive(errOut, "container", "exec", "-it", resolved, "bash")
+		return execInteractive(errOut, "container", monitorExecArgs(resolved, out)...)
 	case "stop":
 		resolved, err := resolveContainerName(name, legacyName)
 		if err != nil {
@@ -52,6 +57,12 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 			return err
 		}
 		return execInteractive(errOut, "container", "rm", resolved)
+	case "monitor":
+		resolved, err := resolveContainerName(name, legacyName)
+		if err != nil {
+			return err
+		}
+		return handleMonitorCommand(args[1:], resolved, out)
 	case "help", "-h", "--help":
 		printUsage(out)
 		return nil
@@ -71,6 +82,11 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  agentwisp shell        Enter the current directory workspace")
 	fmt.Fprintln(out, "  agentwisp stop         Stop the current directory workspace")
 	fmt.Fprintln(out, "  agentwisp rm           Remove the current directory workspace")
+	fmt.Fprintln(out, "  agentwisp monitor on   Enable metadata-only traffic logging")
+	fmt.Fprintln(out, "  agentwisp monitor on --allow-private")
+	fmt.Fprintln(out, "  agentwisp monitor off  Disable traffic logging")
+	fmt.Fprintln(out, "  agentwisp monitor logs Show traffic logs for the current workspace")
+	fmt.Fprintln(out, "  agentwisp monitor clear Clear traffic logs for the current workspace")
 	fmt.Fprintln(out, "  agentwisp help         Show this help")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Aliases:")

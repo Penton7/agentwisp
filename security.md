@@ -62,6 +62,63 @@ was introduced.
 - Do not pass host secrets, credentials, SSH agents, or extra mounts by default.
 - Treat `container inspect` output as untrusted data and never execute it.
 
+## Traffic monitor safety
+
+The experimental traffic monitor must remain metadata-only by default.
+
+Allowed default log fields:
+
+- timestamp;
+- workspace/container name;
+- scheme;
+- destination host;
+- destination port;
+- HTTP method or CONNECT;
+- byte counts;
+- allow/deny result;
+- connection error text.
+
+Do not log by default:
+
+- Authorization headers;
+- cookies;
+- request or response bodies;
+- full query strings;
+- API keys;
+- bearer tokens;
+- SSH keys;
+- package registry tokens.
+
+The monitor should be opt-in per workspace. Treat traffic logs as sensitive local
+data and store them with user-only file permissions.
+
+The proxy must require a per-workspace token. Do not run it as an unauthenticated
+open proxy.
+
+Do not pass the token through process arguments. Tokens belong in user-readable
+state files only.
+
+The proxy must block loopback, unspecified, multicast, and link-local
+destinations by default. A workspace must not be able to use the monitor proxy to
+reach services bound to the host laptop's `127.0.0.1` or `::1`.
+
+The proxy must also block private LAN ranges by default, including `10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`, and `fc00::/7`. Allowing private LAN access
+requires explicit user opt-in with `agentwisp monitor on --allow-private`.
+
+HTTP `CONNECT` must be restricted to expected HTTPS tunneling use by default.
+Do not allow arbitrary TCP tunneling without a separate explicit opt-in.
+
+Proxy lifecycle should use authenticated health/shutdown requests. Do not rely
+only on PID checks because PIDs can be reused by unrelated processes.
+
+Prefer binding the proxy to the narrowest host interface reachable by Apple
+containers. `0.0.0.0` is compatible but broader than ideal; use
+`AGENTWISP_PROXY_LISTEN_HOST` when the bridge/interface address is known.
+
+Do not add transparent TLS interception or custom CA installation without a
+separate explicit design review and user confirmation flow.
+
 ## Reporting a vulnerability
 
 Do not publish exploitable details in a public issue before a fix is available.

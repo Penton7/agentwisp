@@ -12,15 +12,16 @@ func openWorkspace(name, cwd string, out, errOut io.Writer) error {
 	}
 
 	if !exists {
-		return execInteractive(errOut, "container", "run", "-it",
+		args := []string{"run", "-it",
 			"--name", name,
 			"--label", managedLabel+"=true",
 			"--label", workspaceLabel+"="+cwd,
 			"--volume", cwd+":/workspace",
 			"--workdir", "/workspace",
-			"docker.io/library/node:22-bookworm",
-			"bash",
-		)
+		}
+		args = append(args, "docker.io/library/node:22-bookworm")
+		args = append(args, monitorRunCommandArgs(name, out)...)
+		return execInteractive(errOut, "container", args...)
 	}
 
 	running, err := containerRunning(name)
@@ -33,7 +34,7 @@ func openWorkspace(name, cwd string, out, errOut io.Writer) error {
 			return err
 		}
 	}
-	return execInteractive(errOut, "container", "exec", "-it", name, "bash")
+	return execInteractive(errOut, "container", monitorExecArgs(name, out)...)
 }
 
 func enterWorkspace(selected workspace, out, errOut io.Writer) error {
@@ -43,7 +44,7 @@ func enterWorkspace(selected workspace, out, errOut io.Writer) error {
 			return err
 		}
 	}
-	return execInteractive(errOut, "container", "exec", "-it", selected.Name, "bash")
+	return execInteractive(errOut, "container", monitorExecArgs(selected.Name, out)...)
 }
 
 func workspaceIndex(workspaces []workspace, name string) int {
