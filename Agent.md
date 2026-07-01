@@ -20,9 +20,17 @@ Keep the tool fast, predictable, and easy to distribute as one binary.
 
 ## Current architecture
 
-- `main.go` contains the CLI, container integration, TUI, and terminal handling.
-- `main_test.go` contains parser, layout, keyboard, and command help tests.
+- `cmd/agentwisp/main.go` is only the process entrypoint.
+- `internal/agentwisp/cli.go` parses commands and dispatches workflows.
+- `internal/agentwisp/config.go` contains stable identifiers and small shared types.
+- `internal/agentwisp/command.go` wraps external command execution.
+- `internal/agentwisp/container.go` integrates with Apple's `container` CLI and parses inspect output.
+- `internal/agentwisp/workspace.go` starts, attaches to, and resolves workspace selection behavior.
+- `internal/agentwisp/terminal.go` owns terminal mode, key parsing, and terminal width detection.
+- `internal/agentwisp/tui.go` renders and runs the workspace manager UI.
+- `internal/agentwisp/main_test.go` contains parser, layout, keyboard, and command help tests.
 - `security.md` defines dependency and container security policy.
+- `Investigation.md` tracks larger product/security ideas before implementation.
 - `go.mod` intentionally has no third-party dependencies.
 
 Managed containers use:
@@ -101,10 +109,10 @@ dependency review, and `govulncheck`.
 Run before handing off a change:
 
 ```sh
-gofmt -w main.go main_test.go
+gofmt -w cmd/agentwisp internal/agentwisp
 go vet ./...
 go test ./...
-go build -o agentwisp .
+go build -o agentwisp ./cmd/agentwisp
 ```
 
 After dependency changes also run:
@@ -128,7 +136,7 @@ For TUI changes, manually verify at least:
 Build locally first:
 
 ```sh
-go build -o agentwisp .
+go build -o agentwisp ./cmd/agentwisp
 ./agentwisp help
 ./agentwisp
 ```
@@ -151,6 +159,9 @@ shasum -a 256 ./agentwisp /usr/local/bin/agentwisp
 
 Potential features should be implemented incrementally:
 
+- configurable agent command, for example `bash`, `codex`, or `opencode`;
+- persisted workspace metadata under an AgentWisp state directory;
+- optional per-workspace traffic visibility;
 - remove a workspace from the TUI with confirmation;
 - rename or display a friendly workspace name;
 - configurable container image;

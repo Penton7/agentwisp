@@ -29,9 +29,9 @@ before the AgentWisp rename remain discoverable and manageable.
 ## Build
 
 ```sh
-gofmt -w main.go main_test.go
+gofmt -w cmd/agentwisp internal/agentwisp
 go test ./...
-go build -o agentwisp .
+go build -o agentwisp ./cmd/agentwisp
 ```
 
 ## Install
@@ -172,10 +172,10 @@ Development rules and TUI invariants are documented in
 Before submitting changes:
 
 ```sh
-gofmt -w main.go main_test.go
+gofmt -w cmd/agentwisp internal/agentwisp
 go vet ./...
 go test ./...
-go build -o agentwisp .
+go build -o agentwisp ./cmd/agentwisp
 ```
 
 ## Current limitations
