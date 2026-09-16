@@ -40,7 +40,8 @@ Managed containers use:
 - label `dev.agentwisp.workspace=<host-path>`;
 - host project mounted at `/workspace`;
 - working directory `/workspace`;
-- image `docker.io/library/node:22-bookworm`.
+- default image `docker.io/library/node:22-bookworm`, overridden by `AGENTWISP_IMAGE` for new containers;
+- new names include a canonical-path hash; legacy containers are matched by path.
 
 Older `codex-work-*` containers and `dev.codexbox.*` labels must remain
 discoverable. Containers without labels must remain discoverable through their
@@ -57,7 +58,9 @@ discoverable. Containers without labels must remain discoverable through their
 - Enter starts a stopped workspace or attaches to a running one.
 - `S` stops the selected running workspace and disables its traffic monitor proxy
   without closing the TUI.
-- `R` refreshes container state.
+- `R` refreshes container state and preserves selection by name.
+- `D` requests deletion; `Y` confirms and any other key cancels.
+- Deletion keeps host project files and traffic logs, and stops the proxy first.
 - If the traffic monitor is configured for the selected workspace, the TUI shows
   proxy health, PID, port, private LAN policy, and log path.
 
@@ -115,7 +118,7 @@ Run before handing off a change:
 gofmt -w cmd/agentwisp internal/agentwisp
 go vet ./...
 go test ./...
-go build -o agentwisp ./cmd/agentwisp
+go build -o /tmp/agentwisp-check ./cmd/agentwisp
 ```
 
 After dependency changes also run:
@@ -165,9 +168,9 @@ Potential features should be implemented incrementally:
 - configurable agent command, for example `bash`, `codex`, or `opencode`;
 - persisted workspace metadata under an AgentWisp state directory;
 - optional per-workspace traffic visibility;
-- remove a workspace from the TUI with confirmation;
+- search and vertical scrolling for large workspace lists;
 - rename or display a friendly workspace name;
-- configurable container image;
+- validated image presets and reproducible digest-pinned releases;
 - persisted project configuration;
 - search/filter for large workspace lists;
 - sorting options;

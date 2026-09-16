@@ -2,9 +2,8 @@ package agentwisp
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -24,17 +23,35 @@ func listWorkspaces() ([]workspace, error) {
 		running[id] = true
 	}
 
-	workspaces := make([]workspace, 0, len(all))
+	names := make([]string, 0, len(all))
 	for _, name := range all {
-		if !strings.HasPrefix(name, containerPrefix) &&
-			!strings.HasPrefix(name, legacyContainerPrefix) {
-			continue
+		if validWorkspaceName(name) {
+			names = append(names, name)
 		}
-
-		path, err := inspectWorkspacePath(name)
+	}
+	paths := make(map[string]string, len(names))
+	// Bound argv size while avoiding one process launch per workspace.
+	for offset := 0; offset < len(names); offset += 64 {
+		batch := names[offset:min(offset+64, len(names))]
+		output, err := commandOutput("container", append([]string{"inspect"}, batch...)...)
 		if err != nil {
 			return nil, err
 		}
+		parsed, err := workspacePathsFromInspect(output)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range batch {
+			path, ok := parsed[name]
+			if !ok {
+				return nil, fmt.Errorf("inspect omitted workspace %q", name)
+			}
+			paths[name] = path
+		}
+	}
+	workspaces := make([]workspace, 0, len(names))
+	for _, name := range names {
+		path := paths[name]
 		if path == "" {
 			path = "-"
 		}
@@ -52,6 +69,47 @@ func listWorkspaces() ([]workspace, error) {
 		return workspaces[i].Name < workspaces[j].Name
 	})
 	return workspaces, nil
+}
+
+func validWorkspaceName(name string) bool {
+	return name == sanitize(name) &&
+		((strings.HasPrefix(name, containerPrefix) && len(name) > len(containerPrefix)) ||
+			(strings.HasPrefix(name, legacyContainerPrefix) && len(name) > len(legacyContainerPrefix)))
+}
+
+func workspacePathsFromInspect(data []byte) (map[string]string, error) {
+	var records []json.RawMessage
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("parse container inspect: %w", err)
+	}
+	paths := make(map[string]string, len(records))
+	for _, record := range records {
+		var identity struct {
+			ID            string `json:"id"`
+			Configuration struct {
+				ID string `json:"id"`
+			} `json:"configuration"`
+		}
+		if err := json.Unmarshal(record, &identity); err != nil {
+			return nil, err
+		}
+		name := identity.ID
+		if name == "" {
+			name = identity.Configuration.ID
+		}
+		if name == "" {
+			return nil, fmt.Errorf("container inspect record has no ID")
+		}
+		if _, exists := paths[name]; exists {
+			return nil, fmt.Errorf("duplicate container ID %q", name)
+		}
+		path, err := workspacePathFromInspect(record)
+		if err != nil {
+			return nil, err
+		}
+		paths[name] = path
+	}
+	return paths, nil
 }
 
 func containerIDs(all bool) ([]string, error) {
@@ -162,36 +220,41 @@ func mapString(values map[string]any, keys ...string) string {
 }
 
 func containerExists(name string) (bool, error) {
-	cmd := exec.Command("container", "inspect", name)
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
+	ids, err := containerIDs(true)
+	if err != nil {
+		return false, err
 	}
-	if errors.Is(err, exec.ErrNotFound) {
-		return false, fmt.Errorf("container CLI not found")
+	for _, id := range ids {
+		if id == name {
+			return true, nil
+		}
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return false, nil
-	}
-	return false, err
+	return false, nil
 }
 
-func resolveContainerName(preferred, legacy string) (string, error) {
-	exists, err := containerExists(preferred)
+func resolveContainerName(cwd string) (string, error) {
+	preferred := workspaceContainerName(cwd)
+	workspaces, err := listWorkspaces()
 	if err != nil {
 		return "", err
 	}
-	if exists {
-		return preferred, nil
+	match := ""
+	for _, item := range workspaces {
+		path := item.Path
+		if canonical, err := filepath.EvalSymlinks(path); err == nil {
+			path = canonical
+		}
+		if filepath.IsAbs(path) && filepath.Clean(path) == cwd {
+			if match != "" {
+				return "", fmt.Errorf("multiple workspaces for %q; select one in the manager", cwd)
+			}
+			match = item.Name
+		} else if item.Name == preferred {
+			return "", fmt.Errorf("workspace %q belongs to a different or unknown path", preferred)
+		}
 	}
-
-	legacyExists, err := containerExists(legacy)
-	if err != nil {
-		return "", err
-	}
-	if legacyExists {
-		return legacy, nil
+	if match != "" {
+		return match, nil
 	}
 	return preferred, nil
 }

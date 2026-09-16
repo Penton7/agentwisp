@@ -117,6 +117,8 @@ func TestReadTUIKey(t *testing.T) {
 		{input: "\r", want: keyEnter},
 		{input: "r", want: keyRefresh},
 		{input: "s", want: keyStop},
+		{input: "d", want: keyDelete},
+		{input: "Y", want: keyConfirm},
 		{input: "q", want: keyQuit},
 	}
 
@@ -346,7 +348,8 @@ func TestMonitorShellScriptAutoDetectsGateway(t *testing.T) {
 	for _, expected := range []string{
 		"ip route show default",
 		"/proc/net/route",
-		"agentwisp:secret@$proxy_host:49152",
+		"AGENTWISP_MONITOR_TOKEN",
+		"AGENTWISP_MONITOR_PORT",
 		"exec bash",
 	} {
 		if !strings.Contains(script, expected) {
