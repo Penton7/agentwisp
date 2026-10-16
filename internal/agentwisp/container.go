@@ -3,17 +3,16 @@ package agentwisp
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 )
 
-func listWorkspaces() ([]workspace, error) {
-	all, err := containerIDs(true)
+func (r *appleRuntime) List() ([]Workspace, error) {
+	all, err := r.containerIDs(true)
 	if err != nil {
 		return nil, err
 	}
-	runningIDs, err := containerIDs(false)
+	runningIDs, err := r.containerIDs(false)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +32,7 @@ func listWorkspaces() ([]workspace, error) {
 	// Bound argv size while avoiding one process launch per workspace.
 	for offset := 0; offset < len(names); offset += 64 {
 		batch := names[offset:min(offset+64, len(names))]
-		output, err := commandOutput("container", append([]string{"inspect"}, batch...)...)
+		output, err := r.output(append([]string{"inspect"}, batch...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -49,13 +48,14 @@ func listWorkspaces() ([]workspace, error) {
 			paths[name] = path
 		}
 	}
-	workspaces := make([]workspace, 0, len(names))
+	workspaces := make([]Workspace, 0, len(names))
 	for _, name := range names {
 		path := paths[name]
 		if path == "" {
 			path = "-"
 		}
-		workspaces = append(workspaces, workspace{
+		workspaces = append(workspaces, Workspace{
+			ID:      discoveredWorkspaceID(name),
 			Name:    name,
 			Path:    path,
 			Running: running[name],
@@ -112,26 +112,18 @@ func workspacePathsFromInspect(data []byte) (map[string]string, error) {
 	return paths, nil
 }
 
-func containerIDs(all bool) ([]string, error) {
+func (r *appleRuntime) containerIDs(all bool) ([]string, error) {
 	args := []string{"list"}
 	if all {
 		args = append(args, "--all")
 	}
 	args = append(args, "--quiet")
 
-	output, err := commandOutput("container", args...)
+	output, err := r.output(args...)
 	if err != nil {
 		return nil, err
 	}
 	return strings.Fields(string(output)), nil
-}
-
-func inspectWorkspacePath(name string) (string, error) {
-	output, err := commandOutput("container", "inspect", name)
-	if err != nil {
-		return "", err
-	}
-	return workspacePathFromInspect(output)
 }
 
 func workspacePathFromInspect(data []byte) (string, error) {
@@ -219,8 +211,8 @@ func mapString(values map[string]any, keys ...string) string {
 	return ""
 }
 
-func containerExists(name string) (bool, error) {
-	ids, err := containerIDs(true)
+func (r *appleRuntime) Exists(name string) (bool, error) {
+	ids, err := r.containerIDs(true)
 	if err != nil {
 		return false, err
 	}
@@ -232,35 +224,8 @@ func containerExists(name string) (bool, error) {
 	return false, nil
 }
 
-func resolveContainerName(cwd string) (string, error) {
-	preferred := workspaceContainerName(cwd)
-	workspaces, err := listWorkspaces()
-	if err != nil {
-		return "", err
-	}
-	match := ""
-	for _, item := range workspaces {
-		path := item.Path
-		if canonical, err := filepath.EvalSymlinks(path); err == nil {
-			path = canonical
-		}
-		if filepath.IsAbs(path) && filepath.Clean(path) == cwd {
-			if match != "" {
-				return "", fmt.Errorf("multiple workspaces for %q; select one in the manager", cwd)
-			}
-			match = item.Name
-		} else if item.Name == preferred {
-			return "", fmt.Errorf("workspace %q belongs to a different or unknown path", preferred)
-		}
-	}
-	if match != "" {
-		return match, nil
-	}
-	return preferred, nil
-}
-
-func containerRunning(name string) (bool, error) {
-	ids, err := containerIDs(false)
+func (r *appleRuntime) Running(name string) (bool, error) {
+	ids, err := r.containerIDs(false)
 	if err != nil {
 		return false, err
 	}
@@ -270,9 +235,4 @@ func containerRunning(name string) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-func stopWorkspace(name string) error {
-	_, err := commandOutput("container", "stop", name)
-	return err
 }

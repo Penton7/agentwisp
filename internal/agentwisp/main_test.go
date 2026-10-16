@@ -92,7 +92,7 @@ func TestWorkspacePathFromInspectVolumeString(t *testing.T) {
 
 func TestPrintWorkspaces(t *testing.T) {
 	var out bytes.Buffer
-	printWorkspaces(&out, []workspace{
+	printWorkspaces(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 		{Name: "agentwisp-work-web", Path: "/code/web", Running: false},
 	})
@@ -135,7 +135,7 @@ func TestReadTUIKey(t *testing.T) {
 
 func TestRenderTUI(t *testing.T) {
 	var out bytes.Buffer
-	renderTUI(&out, []workspace{
+	renderTUI(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 		{Name: "agentwisp-work-web", Path: "/code/web", Running: false},
 	}, 1, "", 100)
@@ -150,7 +150,7 @@ func TestRenderTUI(t *testing.T) {
 
 func TestRenderTUICompact(t *testing.T) {
 	var out bytes.Buffer
-	renderTUI(&out, []workspace{
+	renderTUI(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/a/very/long/path/to/the/workspace", Running: true},
 	}, 0, "", 40)
 
@@ -165,7 +165,7 @@ func TestRenderTUIKeepsLastColumnEmpty(t *testing.T) {
 	const terminalWidth = 80
 
 	var out bytes.Buffer
-	renderTUI(&out, []workspace{
+	renderTUI(&out, []Workspace{
 		{
 			Name:    "agentwisp-work-project-with-a-long-name",
 			Path:    "/Users/example/projects/a-workspace-with-a-long-name",
@@ -184,7 +184,7 @@ func TestRenderTUIWithMonitorStatus(t *testing.T) {
 	const terminalWidth = 90
 
 	var out bytes.Buffer
-	renderTUIWithMonitorStatus(&out, []workspace{
+	renderTUIWithMonitorStatus(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 	}, 0, "", terminalWidth, "PROXY on  health=up  pid=123  port=49152  private=blocked")
 
@@ -200,7 +200,7 @@ func TestRenderTUIWithMonitorStatus(t *testing.T) {
 }
 
 func TestDesiredNameWidth(t *testing.T) {
-	got := desiredNameWidth([]workspace{
+	got := desiredNameWidth([]Workspace{
 		{Name: "short"},
 		{Name: "agentwisp-work-longer-project"},
 	})
@@ -210,7 +210,7 @@ func TestDesiredNameWidth(t *testing.T) {
 }
 
 func TestAdaptivePanelWidth(t *testing.T) {
-	workspaces := []workspace{
+	workspaces := []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api"},
 	}
 
@@ -223,7 +223,7 @@ func TestAdaptivePanelWidth(t *testing.T) {
 }
 
 func TestAdaptivePanelGivesVolumeMoreSpace(t *testing.T) {
-	workspaces := []workspace{
+	workspaces := []Workspace{
 		{
 			Name: "agentwisp-work-api",
 			Path: "/Users/example/projects/company/platform/services/api",
@@ -238,7 +238,7 @@ func TestAdaptivePanelGivesVolumeMoreSpace(t *testing.T) {
 
 func TestRenderTitleBar(t *testing.T) {
 	var out strings.Builder
-	renderTitleBar(&out, []workspace{
+	renderTitleBar(&out, []Workspace{
 		{Running: true},
 		{Running: false},
 	}, 60)
@@ -253,7 +253,7 @@ func TestRenderTitleBar(t *testing.T) {
 
 func TestWorkspaceListRowsHaveEqualWidth(t *testing.T) {
 	var out strings.Builder
-	renderWorkspaceList(&out, []workspace{
+	renderWorkspaceList(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 		{Name: "agentwisp-work-much-longer-name", Path: "/code/web", Running: false},
 	}, 1, 52)
@@ -268,7 +268,7 @@ func TestWorkspaceListRowsHaveEqualWidth(t *testing.T) {
 }
 
 func TestWorkspaceIndex(t *testing.T) {
-	workspaces := []workspace{
+	workspaces := []Workspace{
 		{Name: "agentwisp-work-api"},
 		{Name: "agentwisp-work-web"},
 	}
@@ -310,7 +310,7 @@ func TestPrintUsage(t *testing.T) {
 
 func TestNarrowWorkspaceListShowsSelectedVolume(t *testing.T) {
 	var out strings.Builder
-	renderWorkspaceList(&out, []workspace{
+	renderWorkspaceList(&out, []Workspace{
 		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
 	}, 0, 32)
 

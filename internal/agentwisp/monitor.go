@@ -123,7 +123,7 @@ func printMonitorStatus(workspaceName string, out io.Writer) error {
 	return nil
 }
 
-func monitorTUIStatus(workspaces []workspace, selected int) string {
+func monitorTUIStatus(workspaces []Workspace, selected int) string {
 	if selected < 0 || selected >= len(workspaces) {
 		return ""
 	}
@@ -244,29 +244,37 @@ func clearMonitorLogs(workspaceName string) error {
 	return nil
 }
 
-// execWorkspaceShell keeps proxy credentials out of host process arguments.
-func execWorkspaceShell(name string, options, target []string, out, errOut io.Writer) error {
-	cfg, err := loadMonitorConfig(name)
+// Prepare keeps proxy credentials out of host process arguments. The caller
+// owns cleanup and must keep the env file alive through the runtime launch.
+type workspaceMonitor struct{}
+
+func (workspaceMonitor) Disable(name string) error { return disableMonitor(name) }
+func (workspaceMonitor) Prepare(req RuntimeLaunch) (RuntimeLaunch, func(), error) {
+	cleanup := func() {}
+	cfg, err := loadMonitorConfig(req.Name)
 	if err != nil {
-		return fmt.Errorf("load monitor config: %w", err)
+		return req, cleanup, fmt.Errorf("load monitor config: %w", err)
 	}
-	command := []string{"bash"}
 	if cfg.Enabled {
-		cfg, err = ensureMonitorProxy(name)
+		cfg, err = ensureMonitorProxy(req.Name)
 		if err != nil {
-			return fmt.Errorf("start monitor: %w", err)
+			return req, cleanup, fmt.Errorf("start monitor: %w", err)
 		}
-		path, cleanup, err := monitorEnvFile(cfg)
+		envPath, release, err := monitorEnvFile(cfg)
 		if err != nil {
-			return err
+			return req, cleanup, err
 		}
-		defer cleanup()
-		options = append(options, "--env-file", path)
-		command = []string{"sh", "-c", monitorShellScript(cfg)}
+		req.EnvFile = envPath
+		req.Command = monitoredCommand(cfg, req.Command)
+		cleanup = release
 	}
-	args := append(options, target...)
-	args = append(args, command...)
-	return execInteractive(errOut, "container", args...)
+	return req, cleanup, nil
+}
+
+func monitoredCommand(cfg monitorConfig, launch []string) []string {
+	// sh -c consumes one argument as $0; the rest stay distinct in "$@".
+	script := strings.TrimSuffix(monitorShellScript(cfg), "exec bash") + `exec "$@"`
+	return append([]string{"sh", "-c", script, "agw-agent"}, launch...)
 }
 
 func monitorEnvFile(cfg monitorConfig) (string, func(), error) {

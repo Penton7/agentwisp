@@ -10,6 +10,10 @@ import (
 )
 
 func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
+	return executeWithService(defaultWorkspaceService(), args, in, out, errOut)
+}
+
+func executeWithService(service *WorkspaceService, args []string, in io.Reader, out, errOut io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -26,31 +30,41 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 	}
 
 	switch command {
+	case "agent":
+		launch, err := agentCommand(args[1:])
+		if err != nil {
+			return err
+		}
+		resolved, err := service.Resolve(cwd)
+		if err != nil {
+			return err
+		}
+		return service.RunAgent(resolved, launch, out, errOut)
 	case "internal-monitor-proxy":
 		if os.Getenv("AGENTWISP_INTERNAL_MONITOR_PROXY") != "1" {
 			return fmt.Errorf("internal command")
 		}
 		return runMonitorProxyCommand(args[1:], out, errOut)
 	case "add", "start", "run":
-		resolved, err := resolveContainerName(cwd)
+		resolved, err := service.Resolve(cwd)
 		if err != nil {
 			return err
 		}
-		return openWorkspace(resolved, cwd, out, errOut)
+		return service.Open(resolved, cwd, out, errOut)
 	case "list", "ls", ".":
-		return chooseWorkspace(in, out, errOut)
+		return chooseWorkspace(service, in, out, errOut)
 	case "shell":
-		resolved, err := resolveContainerName(cwd)
+		resolved, err := service.Resolve(cwd)
 		if err != nil {
 			return err
 		}
-		return execWorkspaceShell(resolved, []string{"exec", "-it", "--workdir", "/workspace"}, []string{resolved}, out, errOut)
+		return service.Shell(resolved, errOut)
 	case "stop":
-		resolved, err := resolveContainerName(cwd)
+		resolved, err := service.Resolve(cwd)
 		if err != nil {
 			return err
 		}
-		return stopWorkspaceAndMonitor(resolved)
+		return service.Stop(resolved)
 	case "rm", "remove":
 		force, yes := false, false
 		for _, arg := range args[1:] {
@@ -63,7 +77,7 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 				return fmt.Errorf("unknown rm option %q", arg)
 			}
 		}
-		resolved, err := resolveContainerName(cwd)
+		resolved, err := service.Resolve(cwd)
 		if err != nil {
 			return err
 		}
@@ -78,13 +92,13 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 				return nil
 			}
 		}
-		if err := removeWorkspace(resolved, force); err != nil {
+		if err := service.Remove(resolved, force); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "Removed %s. Host project files and traffic logs kept.\n", resolved)
 		return nil
 	case "monitor":
-		resolved, err := resolveContainerName(cwd)
+		resolved, err := service.Resolve(cwd)
 		if err != nil {
 			return err
 		}
@@ -100,12 +114,15 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "agentwisp - manage development workspaces")
+	fmt.Fprintln(out, "Also available as agw (same commands and workspace state).")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  agentwisp              Open the workspace manager")
 	fmt.Fprintln(out, "  agentwisp add          Add/start the current directory and enter it")
 	fmt.Fprintln(out, "  agentwisp start        Start the current directory and enter it")
 	fmt.Fprintln(out, "  agentwisp shell        Enter the current directory workspace")
+	fmt.Fprintln(out, "  agw agent claude [-- args...]  Run Claude Code in the current workspace")
+	fmt.Fprintln(out, "  agw agent codex [-- args...]   Run Codex in the current workspace")
 	fmt.Fprintln(out, "  agentwisp stop         Stop the current directory workspace")
 	fmt.Fprintln(out, "  agentwisp rm [--force] [--yes]  Remove current workspace (prompts by default)")
 	fmt.Fprintln(out, "                        --force allows running; --yes skips confirmation")
@@ -120,7 +137,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  run = start, remove = rm, list/ls/. = workspace manager")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Environment:")
-	fmt.Fprintln(out, "  AGENTWISP_IMAGE       Container image for new workspaces")
+	fmt.Fprintf(out, "  AGENTWISP_IMAGE       Container image for new workspaces (default: %s)\n", defaultWorkspaceImage)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Workspace manager keys:")
 	fmt.Fprintln(out, "  Up/Down or J/K        Move selection")

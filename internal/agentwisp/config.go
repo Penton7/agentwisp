@@ -30,12 +30,6 @@ const (
 	legacyWorkspaceLabel  = "dev.codexbox.workspace"
 )
 
-type workspace struct {
-	Name    string
-	Path    string
-	Running bool
-}
-
 func sanitize(s string) string {
 	s = strings.ToLower(s)
 	s = unsafeNameChars.ReplaceAllString(s, "-")
