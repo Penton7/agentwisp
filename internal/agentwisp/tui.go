@@ -481,15 +481,6 @@ func truncateCell(value string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-func renderEmptyTUI(out io.Writer) {
-	fmt.Fprint(out,
-		"\x1b[H\x1b[2J",
-		"\x1b[1;36mAGENTWISP WORKSPACES\x1b[0m\n\n",
-		"No agentwisp workspaces found.\n\n",
-		"\x1b[2mPress any key to close\x1b[0m",
-	)
-}
-
 // External paths, labels and errors must not control the terminal. Escape
 // non-ASCII too: this keeps CJK/combining/emoji paths within cell boundaries
 // without adding a terminal-width dependency. Actual paths stay unchanged.

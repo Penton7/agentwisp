@@ -18,7 +18,7 @@ import (
 
 func TestMonitorTokenNotInShellArguments(t *testing.T) {
 	cfg := monitorConfig{Token: "test-secret", Host: "192.0.2.1", Port: 1234}
-	if strings.Contains(monitorShellScript(cfg), cfg.Token) {
+	if strings.Contains(strings.Join(monitoredCommand(cfg, []string{"bash"}), " "), cfg.Token) {
 		t.Fatal("secret in command arguments")
 	}
 	path, cleanup, err := monitorEnvFile(cfg)

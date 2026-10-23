@@ -3,6 +3,7 @@ package agentwisp
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 )
@@ -235,4 +236,58 @@ func (r *appleRuntime) Running(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// Addresses returns the IPv4 network addresses (and gateways) reported for a
+// container. Inspect output is untrusted: callers must only use these values
+// to select one of the host's own interfaces, never as a bind or dial target.
+func (r *appleRuntime) Addresses(name string) ([]net.IP, error) {
+	if !validWorkspaceName(name) {
+		return nil, fmt.Errorf("invalid workspace name %q", name)
+	}
+	output, err := r.output("inspect", name)
+	if err != nil {
+		return nil, err
+	}
+	return containerAddressesFromInspect(output)
+}
+
+func containerAddressesFromInspect(data []byte) ([]net.IP, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, fmt.Errorf("parse container inspect output: %w", err)
+	}
+	var found []net.IP
+	collectAddresses(value, &found)
+	return found, nil
+}
+
+func collectAddresses(value any, found *[]net.IP) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			lower := strings.ToLower(key)
+			if text, ok := child.(string); ok && (strings.Contains(lower, "address") || strings.Contains(lower, "gateway")) {
+				if ip := parseIPOrCIDR(text); ip != nil {
+					*found = append(*found, ip)
+				}
+				continue
+			}
+			collectAddresses(child, found)
+		}
+	case []any:
+		for _, child := range current {
+			collectAddresses(child, found)
+		}
+	}
+}
+
+func parseIPOrCIDR(text string) net.IP {
+	if ip, _, err := net.ParseCIDR(text); err == nil {
+		return ip.To4()
+	}
+	if ip := net.ParseIP(text); ip != nil {
+		return ip.To4()
+	}
+	return nil
 }

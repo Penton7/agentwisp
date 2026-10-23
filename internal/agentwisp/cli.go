@@ -14,6 +14,31 @@ func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
 }
 
 func executeWithService(service *WorkspaceService, args []string, in io.Reader, out, errOut io.Writer) error {
+	command := "list"
+	if len(args) > 0 {
+		command = args[0]
+	}
+
+	switch command {
+	case "list", "ls", ".":
+		if len(args) <= 1 {
+			return chooseWorkspace(service, in, out, errOut)
+		}
+		if len(args) != 2 || args[1] != "--json" {
+			return fmt.Errorf("usage: agw list [--json]")
+		}
+		return writeWorkspaceListJSON(service, out)
+	case "inspect":
+		id, err := inspectJSONArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return writeWorkspaceInspectJSON(service, id, out)
+	case "help", "-h", "--help":
+		printUsage(out)
+		return nil
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -22,11 +47,6 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 	cwd, err = filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return err
-	}
-
-	command := "list"
-	if len(args) > 0 {
-		command = args[0]
 	}
 
 	switch command {
@@ -51,8 +71,6 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 			return err
 		}
 		return service.Open(resolved, cwd, out, errOut)
-	case "list", "ls", ".":
-		return chooseWorkspace(service, in, out, errOut)
 	case "shell":
 		resolved, err := service.Resolve(cwd)
 		if err != nil {
@@ -102,10 +120,7 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 		if err != nil {
 			return err
 		}
-		return handleMonitorCommand(args[1:], resolved, out)
-	case "help", "-h", "--help":
-		printUsage(out)
-		return nil
+		return handleMonitorCommand(args[1:], resolved, service.runtime.Addresses, out)
 	default:
 		printUsage(out)
 		return fmt.Errorf("unknown command %q", command)
@@ -118,6 +133,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  agentwisp              Open the workspace manager")
+	fmt.Fprintln(out, "  agw list --json        List workspaces as JSON")
+	fmt.Fprintln(out, "  agw inspect <id> --json  Inspect a workspace by its full ID")
 	fmt.Fprintln(out, "  agentwisp add          Add/start the current directory and enter it")
 	fmt.Fprintln(out, "  agentwisp start        Start the current directory and enter it")
 	fmt.Fprintln(out, "  agentwisp shell        Enter the current directory workspace")

@@ -217,8 +217,8 @@ func TestWorkspaceImageOnlyUsedForCreation(t *testing.T) {
 		image           string
 		want            string
 	}{
-		{name: "new default", want: "agentwisp-agents:local bash"},
-		{name: "new override", image: "custom:local", want: "custom:local bash"},
+		{name: "new default", want: "--workdir /workspace agentwisp-agents:local sh -c"},
+		{name: "new override", image: "custom:local", want: "--workdir /workspace custom:local sh -c"},
 		{name: "existing stopped", exists: true, image: "--invalid-unused", want: "start codex-work-existing"},
 		{name: "existing running", exists: true, running: true, want: "exec -it --workdir /workspace codex-work-existing bash"},
 	} {
@@ -250,6 +250,12 @@ func TestWorkspaceImageOnlyUsedForCreation(t *testing.T) {
 			log := string(data)
 			if !strings.Contains(log, tc.want) {
 				t.Fatalf("expected %q in calls: %s", tc.want, log)
+			}
+			if !tc.exists && !strings.Contains(log, "run --detach") {
+				t.Fatalf("new container not detached: %s", log)
+			}
+			if !strings.Contains(log, "exec -it --workdir /workspace codex-work-existing bash") {
+				t.Fatalf("shell not entered through exec: %s", log)
 			}
 			if tc.exists && (strings.Contains(log, "run ") || strings.Contains(log, "rm ")) {
 				t.Fatalf("existing container recreated: %s", log)

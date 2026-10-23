@@ -55,8 +55,9 @@ attachment; terminating an agent and deleting a workspace are separate actions.
 
 ## Current limits and validation
 
-A persistent registry, JSON API, managed PTYs, reconnect, and context exchange
-are not implemented. The shared service is described in
+A persistent registry, HTTP API, managed PTYs, reconnect, and context exchange
+are not implemented. Read-only [JSON CLI commands](json-inventory.md) expose
+workspace inventory. The shared service is described in
 [Workspace service and runtime adapter](runtime-service.md).
 
 Validation performed on Linux includes Go tests with the race detector, vet,

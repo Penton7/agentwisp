@@ -8,10 +8,14 @@ remain unchanged.
 ## Runtime boundary
 
 [`Runtime`](../internal/agentwisp/runtime.go) defines
-`List`, `Exists`, `Running`, `Start`, `Stop`, `Remove`, `CheckAgent`, and `Launch`.
+`List`, `Exists`, `Running`, `Start`, `Stop`, `Remove`, `Create`, `Addresses`,
+`CheckAgent`, and `Launch`.
 The `appleRuntime` adapter constructs argument arrays for Apple's `container`
 CLI. It preserves batched inspection, sorting, and legacy container discovery.
 
+`RuntimeCreate` creates a detached container whose main process is a keep-alive
+loop; `RuntimeLaunch` is always an interactive `exec` into an existing container,
+so no user shell or agent is the container's main process.
 `RuntimeLaunch` carries structured launch parameters. User prompts and paths are
 not interpolated into shell source. The executable check uses a fixed script
 with the executable passed separately as `$1`.
@@ -73,5 +77,5 @@ existence checks and mutations are not addressed yet. A session broker, Web API,
 and persistent registry are not implemented. Interactive processes remain
 attached to the host terminal; this interface is not a web-terminal transport.
 
-Read-only JSON inventory and inspection commands are planned but are not
-available in the current CLI.
+Read-only JSON inventory and inspection use this service. See the
+[JSON command reference](json-inventory.md) for the versioned output contract.

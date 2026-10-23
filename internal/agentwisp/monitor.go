@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,6 +26,8 @@ import (
 const (
 	monitorConfigFile     = "monitor.json"
 	monitorLogFile        = "traffic.ndjson"
+	monitorLockFile       = "monitor.lock"
+	monitorProxyLogFile   = "proxy.log"
 	monitorAuthUser       = "agentwisp"
 	monitorHealthPath     = "/agentwisp-health"
 	monitorStopPath       = "/agentwisp-shutdown"
@@ -44,6 +47,9 @@ type monitorConfig struct {
 	AllowPrivate bool   `json:"allow_private"`
 }
 
+// Variable so tests can exercise contention without long waits.
+var monitorLockTimeout = 10 * time.Second
+
 var monitorControlClient = http.Client{
 	Timeout:       monitorControlTimeout,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -51,6 +57,12 @@ var monitorControlClient = http.Client{
 		Proxy: nil,
 	},
 }
+
+// addressLookup reports a running container's network addresses. It is used
+// only to pick which host interface the proxy listens on.
+type addressLookup func(string) ([]net.IP, error)
+
+var errMonitorNoNetwork = errors.New("workspace has no reachable network address; start it first")
 
 type trafficEvent struct {
 	Time      string `json:"time"`
@@ -65,7 +77,7 @@ type trafficEvent struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func handleMonitorCommand(args []string, workspaceName string, out io.Writer) error {
+func handleMonitorCommand(args []string, workspaceName string, addresses addressLookup, out io.Writer) error {
 	if len(args) == 0 {
 		return printMonitorStatus(workspaceName, out)
 	}
@@ -76,12 +88,16 @@ func handleMonitorCommand(args []string, workspaceName string, out io.Writer) er
 		if err != nil {
 			return err
 		}
-		cfg, err := enableMonitor(workspaceName, options)
+		cfg, err := enableMonitor(workspaceName, options, addresses)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "Traffic monitor enabled for %s\n", workspaceName)
-		fmt.Fprintf(out, "Proxy: %s\n", proxyDescription(cfg))
+		if cfg.Port == 0 {
+			fmt.Fprintln(out, "Proxy: starts with the next agw shell/agent (workspace is not running)")
+		} else {
+			fmt.Fprintf(out, "Proxy: %s\n", proxyDescription(cfg))
+		}
 		fmt.Fprintf(out, "Private LAN: %s\n", privateLANStatus(cfg))
 		fmt.Fprintln(out, "Logs: "+monitorLogPath(workspaceName))
 		fmt.Fprintln(out, "Note: existing shells need to be reopened through agentwisp to receive proxy env.")
@@ -163,7 +179,45 @@ func parseMonitorOnOptions(args []string) (monitorOnOptions, error) {
 	return options, nil
 }
 
-func enableMonitor(workspaceName string, options monitorOnOptions) (monitorConfig, error) {
+// lockMonitorState serializes monitor lifecycle for one workspace across
+// processes, so two shells opened at once cannot start two proxies. Only the
+// public lifecycle entry points lock; *Locked helpers expect the lock held.
+func lockMonitorState(workspaceName string) (func(), error) {
+	if err := ensureMonitorStateDir(workspaceName); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(monitorStateDir(workspaceName), monitorLockFile)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fd := int(file.Fd())
+	for deadline := time.Now().Add(monitorLockTimeout); ; {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = syscall.Flock(fd, syscall.LOCK_UN)
+				_ = file.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			file.Close()
+			return nil, fmt.Errorf("lock monitor state: %w", err)
+		}
+		if time.Now().After(deadline) {
+			file.Close()
+			return nil, fmt.Errorf("monitor state for %s is busy in another agentwisp process", workspaceName)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func enableMonitor(workspaceName string, options monitorOnOptions, addresses addressLookup) (monitorConfig, error) {
+	unlock, err := lockMonitorState(workspaceName)
+	if err != nil {
+		return monitorConfig{}, err
+	}
+	defer unlock()
 	cfg, err := loadMonitorConfig(workspaceName)
 	if err != nil {
 		return monitorConfig{}, err
@@ -188,10 +242,20 @@ func enableMonitor(workspaceName string, options monitorOnOptions) (monitorConfi
 	if err := saveMonitorConfig(workspaceName, cfg); err != nil {
 		return monitorConfig{}, err
 	}
-	return ensureMonitorProxy(workspaceName)
+	started, err := ensureMonitorProxyLocked(workspaceName, addresses)
+	if errors.Is(err, errMonitorNoNetwork) {
+		// Enabled is persisted; the proxy starts with the next launch.
+		return cfg, nil
+	}
+	return started, err
 }
 
 func disableMonitor(workspaceName string) error {
+	unlock, err := lockMonitorState(workspaceName)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cfg, err := loadMonitorConfig(workspaceName)
 	if err != nil {
 		return err
@@ -246,17 +310,19 @@ func clearMonitorLogs(workspaceName string) error {
 
 // Prepare keeps proxy credentials out of host process arguments. The caller
 // owns cleanup and must keep the env file alive through the runtime launch.
-type workspaceMonitor struct{}
+type workspaceMonitor struct {
+	addresses addressLookup
+}
 
 func (workspaceMonitor) Disable(name string) error { return disableMonitor(name) }
-func (workspaceMonitor) Prepare(req RuntimeLaunch) (RuntimeLaunch, func(), error) {
+func (m workspaceMonitor) Prepare(req RuntimeLaunch) (RuntimeLaunch, func(), error) {
 	cleanup := func() {}
 	cfg, err := loadMonitorConfig(req.Name)
 	if err != nil {
 		return req, cleanup, fmt.Errorf("load monitor config: %w", err)
 	}
 	if cfg.Enabled {
-		cfg, err = ensureMonitorProxy(req.Name)
+		cfg, err = m.ensureProxy(req.Name)
 		if err != nil {
 			return req, cleanup, fmt.Errorf("start monitor: %w", err)
 		}
@@ -271,14 +337,23 @@ func (workspaceMonitor) Prepare(req RuntimeLaunch) (RuntimeLaunch, func(), error
 	return req, cleanup, nil
 }
 
-func monitoredCommand(cfg monitorConfig, launch []string) []string {
+func (m workspaceMonitor) ensureProxy(name string) (monitorConfig, error) {
+	unlock, err := lockMonitorState(name)
+	if err != nil {
+		return monitorConfig{}, err
+	}
+	defer unlock()
+	return ensureMonitorProxyLocked(name, m.addresses)
+}
+
+func monitoredCommand(_ monitorConfig, launch []string) []string {
 	// sh -c consumes one argument as $0; the rest stay distinct in "$@".
-	script := strings.TrimSuffix(monitorShellScript(cfg), "exec bash") + `exec "$@"`
+	script := monitorShellPrelude() + `; exec "$@"`
 	return append([]string{"sh", "-c", script, "agw-agent"}, launch...)
 }
 
 func monitorEnvFile(cfg monitorConfig) (string, func(), error) {
-	if strings.ContainsAny(cfg.Host+cfg.Token, "\r\n") || cfg.Port < 1 || cfg.Port > 65535 {
+	if strings.ContainsAny(cfg.Host+cfg.ListenHost+cfg.Token, "\r\n") || cfg.Port < 1 || cfg.Port > 65535 {
 		return "", nil, fmt.Errorf("invalid monitor environment")
 	}
 	file, err := os.CreateTemp("", "agentwisp-proxy-*.env")
@@ -286,7 +361,7 @@ func monitorEnvFile(cfg monitorConfig) (string, func(), error) {
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.Remove(file.Name()) }
-	_, err = fmt.Fprintf(file, "AGENTWISP_MONITOR_TOKEN=%s\nAGENTWISP_MONITOR_PORT=%d\nAGENTWISP_PROXY_HOST=%s\n", cfg.Token, cfg.Port, cfg.Host)
+	_, err = fmt.Fprintf(file, "AGENTWISP_MONITOR_TOKEN=%s\nAGENTWISP_MONITOR_PORT=%d\nAGENTWISP_PROXY_HOST=%s\n", cfg.Token, cfg.Port, containerProxyHost(cfg))
 	closeErr := file.Close()
 	if err == nil {
 		err = closeErr
@@ -316,7 +391,21 @@ func monitorEnv(cfg monitorConfig) []string {
 	}
 }
 
-func monitorShellScript(_ monitorConfig) string {
+// containerProxyHost is the address a workspace uses to reach the proxy. An
+// explicit AGENTWISP_PROXY_HOST wins; a concrete bridge bind address is reachable
+// as-is; otherwise the in-container script detects the default gateway.
+func containerProxyHost(cfg monitorConfig) string {
+	if cfg.Host != "" {
+		return cfg.Host
+	}
+	if ip := net.ParseIP(cfg.ListenHost); ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
+		return cfg.ListenHost
+	}
+	return ""
+}
+
+// monitorShellPrelude exports proxy variables; callers append the final exec.
+func monitorShellPrelude() string {
 	return strings.Join([]string{
 		`proxy_host="${AGENTWISP_PROXY_HOST:-}"`,
 		`if [ -z "$proxy_host" ] && command -v ip >/dev/null 2>&1; then proxy_host="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"; fi`,
@@ -327,7 +416,6 @@ func monitorShellScript(_ monitorConfig) string {
 		`export HTTP_PROXY="$proxy_url" HTTPS_PROXY="$proxy_url" http_proxy="$proxy_url" https_proxy="$proxy_url"`,
 		`export NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 AGENTWISP_TRAFFIC_MONITOR=metadata`,
 		`unset AGENTWISP_MONITOR_TOKEN AGENTWISP_MONITOR_PORT`,
-		`exec bash`,
 	}, "; ")
 }
 
@@ -343,7 +431,7 @@ func proxyDescription(cfg monitorConfig) string {
 	return fmt.Sprintf("http://agentwisp:<token>@%s:%d", host, cfg.Port)
 }
 
-func ensureMonitorProxy(workspaceName string) (monitorConfig, error) {
+func ensureMonitorProxyLocked(workspaceName string, addresses addressLookup) (monitorConfig, error) {
 	cfg, err := loadMonitorConfig(workspaceName)
 	if err != nil {
 		return monitorConfig{}, err
@@ -367,29 +455,45 @@ func ensureMonitorProxy(workspaceName string) (monitorConfig, error) {
 		_ = shutdownMonitorProxy(cfg)
 	}
 
-	listenHost := proxyListenHost()
-	if net.ParseIP(listenHost) == nil {
-		return monitorConfig{}, fmt.Errorf("AGENTWISP_PROXY_LISTEN_HOST must be an IP address")
-	}
-	cfg.ListenHost = listenHost
-	if err := saveMonitorConfig(workspaceName, cfg); err != nil {
+	listenHost, err := monitorListenHost(workspaceName, addresses)
+	if err != nil {
 		return monitorConfig{}, err
 	}
-	port, err := availablePort(listenHost)
+	// The child serves this exact listener (fd 3), so no other process can
+	// take the port between selection and bind.
+	listener, err := net.Listen("tcp", net.JoinHostPort(listenHost, "0"))
 	if err != nil {
+		return monitorConfig{}, err
+	}
+	defer listener.Close()
+	listenerFile, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		return monitorConfig{}, err
+	}
+	defer listenerFile.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	cfg.ListenHost = listenHost
+	if err := saveMonitorConfig(workspaceName, cfg); err != nil {
 		return monitorConfig{}, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return monitorConfig{}, err
 	}
+	logPath := filepath.Join(monitorStateDir(workspaceName), monitorProxyLogFile)
+	proxyLog, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return monitorConfig{}, err
+	}
+	defer proxyLog.Close()
 
-	listen := net.JoinHostPort(listenHost, strconv.Itoa(port))
-	cmd := exec.Command(executable, "internal-monitor-proxy", "--workspace", workspaceName, "--listen", listen)
+	cmd := exec.Command(executable, "internal-monitor-proxy", "--workspace", workspaceName)
 	cmd.Env = append(os.Environ(), "AGENTWISP_INTERNAL_MONITOR_PROXY=1")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
 	cmd.Stdin = nil
+	cmd.Stdout = proxyLog
+	cmd.Stderr = proxyLog
+	cmd.ExtraFiles = []*os.File{listenerFile}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return monitorConfig{}, err
@@ -410,7 +514,7 @@ func ensureMonitorProxy(workspaceName string) (monitorConfig, error) {
 	if !ready {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return monitorConfig{}, fmt.Errorf("monitor proxy did not become ready")
+		return monitorConfig{}, fmt.Errorf("monitor proxy did not become ready; see %s", logPath)
 	}
 	if err := saveMonitorConfig(workspaceName, cfg); err != nil {
 		_ = cmd.Process.Kill()
@@ -423,26 +527,71 @@ func ensureMonitorProxy(workspaceName string) (monitorConfig, error) {
 	return cfg, nil
 }
 
-func runMonitorProxyCommand(args []string, out, errOut io.Writer) error {
-	workspaceName := ""
-	listen := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--workspace":
-			i++
-			if i < len(args) {
-				workspaceName = args[i]
+// monitorListenHost picks the host address the proxy binds to. Without an
+// explicit override it is the host's own address on the container network, so
+// the proxy is not exposed on Wi-Fi/LAN interfaces. 0.0.0.0 is opt-in only.
+func monitorListenHost(workspaceName string, addresses addressLookup) (string, error) {
+	if host := os.Getenv("AGENTWISP_PROXY_LISTEN_HOST"); host != "" {
+		if net.ParseIP(host) == nil {
+			return "", fmt.Errorf("AGENTWISP_PROXY_LISTEN_HOST must be an IP address")
+		}
+		return host, nil
+	}
+	if addresses == nil {
+		return "", errMonitorNoNetwork
+	}
+	containerIPs, err := addresses(workspaceName)
+	if err != nil {
+		return "", fmt.Errorf("find workspace network: %w", err)
+	}
+	hostAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	return hostAddressForContainer(containerIPs, hostAddrs)
+}
+
+// hostAddressForContainer returns the host interface address on the same
+// subnet as the container. Container-reported IPs only select among the host's
+// own addresses; they are never bound or dialed directly.
+func hostAddressForContainer(containerIPs []net.IP, hostAddrs []net.Addr) (string, error) {
+	for _, containerIP := range containerIPs {
+		if containerIP == nil || containerIP.IsLoopback() || containerIP.IsUnspecified() {
+			continue
+		}
+		for _, addr := range hostAddrs {
+			network, ok := addr.(*net.IPNet)
+			if !ok || network.IP.To4() == nil || network.IP.IsLoopback() {
+				continue
 			}
-		case "--listen":
-			i++
-			if i < len(args) {
-				listen = args[i]
+			if network.Contains(containerIP) {
+				return network.IP.String(), nil
 			}
 		}
 	}
-	if workspaceName == "" || listen == "" {
-		return fmt.Errorf("internal monitor proxy requires --workspace and --listen")
+	if len(containerIPs) == 0 {
+		return "", errMonitorNoNetwork
 	}
+	return "", fmt.Errorf("no host interface shares the workspace network; set AGENTWISP_PROXY_LISTEN_HOST")
+}
+
+func runMonitorProxyCommand(args []string, out, errOut io.Writer) error {
+	workspaceName := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--workspace" && i+1 < len(args) {
+			i++
+			workspaceName = args[i]
+		}
+	}
+	if workspaceName == "" {
+		return fmt.Errorf("internal monitor proxy requires --workspace")
+	}
+	// The parent passes its bound listener as the first extra file (fd 3).
+	listener, err := net.FileListener(os.NewFile(3, "monitor-listener"))
+	if err != nil {
+		return fmt.Errorf("internal monitor proxy requires an inherited listener: %w", err)
+	}
+	defer listener.Close()
 
 	cfg, err := loadMonitorConfig(workspaceName)
 	if err != nil {
@@ -461,7 +610,6 @@ func runMonitorProxyCommand(args []string, out, errOut io.Writer) error {
 		slots:        make(chan struct{}, monitorMaxRequests),
 	}
 	server := &http.Server{
-		Addr:              listen,
 		Handler:           proxy,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -472,8 +620,8 @@ func runMonitorProxyCommand(args []string, out, errOut io.Writer) error {
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}
-	fmt.Fprintf(out, "agentwisp monitor proxy listening on %s\n", listen)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	fmt.Fprintf(out, "agentwisp monitor proxy listening on %s\n", listener.Addr())
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(errOut, "agentwisp monitor proxy: %v\n", err)
 		return err
 	}
@@ -601,6 +749,12 @@ func (p *trafficProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removeHopByHopHeaders(outReq.Header)
+	// ContentLength is -1 for chunked bodies; log bytes actually forwarded.
+	requestBody := &countingReadCloser{ReadCloser: http.NoBody}
+	if r.Body != nil && r.Body != http.NoBody {
+		requestBody.ReadCloser = r.Body
+		outReq.Body = requestBody
+	}
 
 	resp, err := p.transport.RoundTrip(outReq)
 	if err != nil {
@@ -609,7 +763,7 @@ func (p *trafficProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusForbidden
 		}
 		http.Error(w, "proxy failed", status)
-		p.log(trafficEventFromRequest(r, p.workspace, start, 0, 0, "deny", err))
+		p.log(trafficEventFromRequest(r, p.workspace, start, requestBody.count.Load(), 0, "deny", err))
 		return
 	}
 	defer resp.Body.Close()
@@ -618,7 +772,7 @@ func (p *trafficProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	bytesOut, _ := io.Copy(w, resp.Body)
-	p.log(trafficEventFromRequest(r, p.workspace, start, r.ContentLength, bytesOut, "allow", nil))
+	p.log(trafficEventFromRequest(r, p.workspace, start, requestBody.count.Load(), bytesOut, "allow", nil))
 }
 
 func trafficEventFromRequest(r *http.Request, workspace string, start time.Time, bytesIn, bytesOut int64, decision string, err error) trafficEvent {
@@ -699,6 +853,18 @@ type bufferedConn struct {
 }
 
 func (c *bufferedConn) Read(data []byte) (int, error) { return c.reader.Read(data) }
+
+// countingReadCloser is read by the transport's writer goroutine.
+type countingReadCloser struct {
+	io.ReadCloser
+	count atomic.Int64
+}
+
+func (c *countingReadCloser) Read(data []byte) (int, error) {
+	n, err := c.ReadCloser.Read(data)
+	c.count.Add(int64(n))
+	return n, err
+}
 
 type countingConn struct {
 	net.Conn
@@ -864,26 +1030,6 @@ func proxyHostForContainers() string {
 		return host
 	}
 	return ""
-}
-
-func availablePort(host string) (int, error) {
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		return 0, err
-	}
-	defer listener.Close()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, fmt.Errorf("unexpected listener address %s", listener.Addr())
-	}
-	return addr.Port, nil
-}
-
-func proxyListenHost() string {
-	if host := os.Getenv("AGENTWISP_PROXY_LISTEN_HOST"); host != "" {
-		return host
-	}
-	return "0.0.0.0"
 }
 
 func monitorControlURL(cfg monitorConfig, path string) string {

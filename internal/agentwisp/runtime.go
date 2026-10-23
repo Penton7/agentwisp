@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"syscall"
@@ -17,17 +18,31 @@ type Runtime interface {
 	Start(string) error
 	Stop(string) error
 	Remove(string, bool) error
+	Create(RuntimeCreate) error
+	Addresses(string) ([]net.IP, error)
 	CheckAgent(string, string) error
 	Launch(RuntimeLaunch, io.Writer) error
 }
 
-type RuntimeLaunch struct {
+// RuntimeCreate describes a new detached workspace container. Its main process
+// is a keep-alive loop, so interactive shells and agents are always exec
+// sessions: exiting one of them never stops the container under the others.
+type RuntimeCreate struct {
 	Name     string
-	Image    string // Nonempty only when creating a container.
+	Image    string
 	HostPath string
-	Command  []string
-	EnvFile  string
 }
+
+// RuntimeLaunch is an interactive exec session in an existing container.
+type RuntimeLaunch struct {
+	Name    string
+	Command []string
+	EnvFile string
+}
+
+// keepAliveScript is PID 1 of new containers. The trap lets `container stop`
+// finish promptly: PID 1 ignores SIGTERM unless it installs a handler.
+const keepAliveScript = `trap 'exit 0' TERM INT; while :; do sleep 86400 & wait $!; done`
 
 var (
 	ErrWorkspaceAbsent    = errors.New("workspace absent")
@@ -94,20 +109,25 @@ func (r *appleRuntime) CheckAgent(name, executable string) error {
 	_, err := r.output("exec", name, "sh", "-c", `command -v "$1" >/dev/null`, "agw-check", executable)
 	return err
 }
+func (r *appleRuntime) Create(req RuntimeCreate) error {
+	if !validWorkspaceName(req.Name) || req.Image == "" || req.HostPath == "" {
+		return fmt.Errorf("invalid runtime create")
+	}
+	_, err := r.output("run", "--detach", "--name", req.Name,
+		"--label", managedLabel+"=true", "--label", workspaceLabel+"="+req.HostPath,
+		"--volume", req.HostPath+":/workspace", "--workdir", "/workspace",
+		req.Image, "sh", "-c", keepAliveScript)
+	return err
+}
 func (r *appleRuntime) Launch(req RuntimeLaunch, errOut io.Writer) error {
 	if !validWorkspaceName(req.Name) || len(req.Command) == 0 {
 		return fmt.Errorf("invalid runtime launch")
 	}
 	args := []string{"exec", "-it", "--workdir", "/workspace"}
-	target := req.Name
-	if req.Image != "" {
-		args = []string{"run", "-it", "--name", req.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + req.HostPath, "--volume", req.HostPath + ":/workspace", "--workdir", "/workspace"}
-		target = req.Image
-	}
 	if req.EnvFile != "" {
 		args = append(args, "--env-file", req.EnvFile)
 	}
-	args = append(args, target)
+	args = append(args, req.Name)
 	args = append(args, req.Command...)
 	return runtimeError(args[0], r.commands.Interactive(errOut, "container", args...))
 }

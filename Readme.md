@@ -61,6 +61,7 @@ or its standard library. After verifying the selected version, build:
 gofmt -w cmd/agentwisp internal/agentwisp
 go test ./...
 go build -o agentwisp ./cmd/agentwisp
+go build -o agw ./cmd/agw
 ```
 
 ## Install
@@ -69,6 +70,7 @@ Install the binary so it is available from any directory:
 
 ```sh
 sudo install -m 755 ./agentwisp /usr/local/bin/agentwisp
+sudo install -m 755 ./agw /usr/local/bin/agw
 rehash
 ```
 
@@ -154,17 +156,48 @@ Q or Esc          Quit
 The interface adapts to terminal width and keeps a compact fallback for narrow
 windows.
 
+## JSON workspace inventory
+
+Use read-only JSON output for scripts:
+
+```sh
+agw list --json
+agw inspect <workspace-id> --json
+```
+
+Copy the full `id` from the list response. Both responses include
+`schema_version: 1`; errors go to stderr with a nonzero exit code. Without
+`--json`, `agw list` still opens the workspace manager. See the
+[JSON command reference](docs/json-inventory.md) for fields and examples.
+
 ## Container configuration
 
 New workspaces currently use:
 
 ```text
-Image:       docker.io/library/node:22-bookworm
+Image:       agentwisp-agents:local (locally built from images/agents)
 Mount:       <host-project>:/workspace
 Workdir:     /workspace
 Shell:       bash
 Name:        agentwisp-work-<sanitized-directory-name>-<path-hash>
 ```
+
+Build the default image once from the AgentWisp repository root, supplying exact
+versions for both agents:
+
+```sh
+: "${CODEX_VERSION:?Set CODEX_VERSION to a reviewed X.Y.Z version}"
+: "${CLAUDE_VERSION:?Set CLAUDE_VERSION to a reviewed X.Y.Z version}"
+container build \
+  --build-arg CODEX_VERSION="$CODEX_VERSION" \
+  --build-arg CLAUDE_VERSION="$CLAUDE_VERSION" \
+  -t agentwisp-agents:local images/agents
+```
+
+Then run `agw add` in a new project directory. No `AGENTWISP_IMAGE` setting is
+needed. Existing workspaces keep their original image, even after stop/start
+or rebuilding the tag. To override the image for a new workspace, use
+`AGENTWISP_IMAGE=<image:tag> agw add`. The image is not built automatically.
 
 Labels:
 
@@ -175,6 +208,12 @@ dev.agentwisp.workspace=<host-project>
 
 Legacy labels under `dev.codexbox.*` are read for migration compatibility but
 are not written to new containers.
+
+New containers are created detached with a small keep-alive main process; every
+shell and agent is a separate `exec` session. Exiting one shell no longer stops
+the container under agents running in other panes. Workspaces created by
+earlier versions still use their first `bash` as the main process; recreate them
+(after exporting any container-only data) to get this behavior.
 
 ## Example workflow
 
@@ -258,9 +297,17 @@ override it:
 AGENTWISP_PROXY_HOST=<host-gateway-name-or-ip> agentwisp shell
 ```
 
-By default, the host proxy listens on `0.0.0.0` so Apple containers can reach it.
-If you know the specific host-side interface address that containers can reach,
-bind only to that address:
+By default, the host proxy listens only on the host's address on the workspace
+container network: AgentWisp reads the container's address from `container
+inspect` and picks the host interface on the same subnet. It is not exposed on
+Wi-Fi or other LAN interfaces. The workspace receives that address directly, so
+gateway detection is only a fallback. If the workspace is not running,
+`monitor on` saves the setting and the proxy starts with the next
+`agw shell`/`agw agent`. Proxy startup errors are written to
+`~/.agentwisp/workspaces/<workspace>/proxy.log`.
+
+If detection does not work on your setup, choose the bind address explicitly
+(`0.0.0.0` restores the old, broader behavior):
 
 ```sh
 AGENTWISP_PROXY_LISTEN_HOST=<host-interface-ip> agentwisp monitor on
@@ -292,6 +339,7 @@ gofmt -w cmd/agentwisp internal/agentwisp
 go vet ./...
 go test ./...
 go build -o agentwisp ./cmd/agentwisp
+go build -o agw ./cmd/agw
 ```
 
 ## Current limitations
@@ -303,7 +351,7 @@ go build -o agentwisp ./cmd/agentwisp
 - The source bind mount is writable, including `.git` and any project secrets.
 - TUI paths containing non-ASCII or control characters use escaped notation to preserve terminal safety and alignment.
 - Large workspace lists do not yet have vertical scrolling or search.
-- Concurrent monitor lifecycle commands for the same workspace are not yet serialized across processes.
+- Monitor lifecycle is serialized per workspace with a file lock; container start/stop/remove are not yet serialized across processes.
 
 ## Removing workspaces
 
@@ -376,9 +424,9 @@ recursive permission changes to the host project.
 Proxy credentials are supplied via a temporary `0600` environment file rather
 than shell/process arguments. The file is removed after the interactive process
 exits; a host process crash can leave it in the OS temporary directory. Credentials
-are still visible to processes inside the workspace and may be retained in
-container runtime metadata. This is not isolation from other processes of the
-same host user.
+are still visible to processes inside the workspace. New workspaces receive the
+environment file only on `exec`, not at container creation. This is not isolation
+from other processes of the same host user.
 
 Config writes are atomic. Monitor startup waits for an authenticated health
 response. Custom IP bindings are persisted for later control requests. The proxy
@@ -388,5 +436,47 @@ buffered CONNECT data. Limits: 64 concurrent forwarded requests/tunnels,
 8 MiB per traffic log with one rotated `.1` file (a record can exceed the limit).
 `monitor logs` shows the active file; `monitor clear` clears both files.
 
-See [`docs/repository-review-2026-09-08.md`](docs/repository-review-2026-09-08.md)
-for the repository review, remaining security risks, and product research.
+See the [documentation index](docs/Readme.md) for usage and architecture, and
+the [security policy](security.md) for security boundaries and limitations.
+
+## Short command and agent choice
+
+`agw` and `agentwisp` use the same commands, container names and monitor state.
+Build/install both entrypoints as shown above; a shell alias is not required.
+
+```sh
+agw
+agw add
+agw agent claude
+agw agent claude -- --continue
+agw agent codex
+agw stop
+```
+
+`agent` requires an existing workspace with the selected executable installed.
+It starts a stopped workspace, runs the agent in `/workspace`, and uses the
+configured traffic monitor. It does not install agents, copy host credentials,
+transfer conversations between providers, or add permission-bypass flags.
+Pass agent-specific arguments after the provider name, optionally following `--`.
+Use interactive input for sensitive prompts; argv is visible in process listings.
+
+The default image contains both tools; build it using [`images/agents/Readme.md`](images/agents/Readme.md).
+Existing workspace images remain unchanged. Authenticate each agent inside its
+container; removal loses container-only auth and session state.
+
+## Multi-workspace interface direction
+
+The recommended direction is a local Web UI backed by a persistent session
+service, while retaining the CLI. The current foundations are described in
+[Workspaces, agent sessions, and attachments](docs/core-models.md) and
+[Workspace service and runtime adapter](docs/runtime-service.md).
+Managed sessions and context exchange between workspaces are not implemented yet.
+
+Open [`design/workspace-console/index.html`](design/workspace-console/index.html)
+in a browser for the interactive split-view concept. It uses sample data only:
+there is no live web API or terminal connection. Try two/four panes, per-pane
+workspace selection, focus, search, the attention queue, and diff/access/events.
+
+Until the session service exists, run `agw agent claude` / `agw agent codex`
+in separate terminal panes, each from the intended project directory. Separate
+panes do not isolate files: use separate project copies for simultaneous writers.

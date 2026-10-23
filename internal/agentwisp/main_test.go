@@ -344,13 +344,13 @@ func TestMonitorEnv(t *testing.T) {
 }
 
 func TestMonitorShellScriptAutoDetectsGateway(t *testing.T) {
-	script := monitorShellScript(monitorConfig{Port: 49152, Token: "secret"})
+	script := strings.Join(monitoredCommand(monitorConfig{Port: 49152, Token: "secret"}, []string{"bash"}), " ")
 	for _, expected := range []string{
 		"ip route show default",
 		"/proc/net/route",
 		"AGENTWISP_MONITOR_TOKEN",
 		"AGENTWISP_MONITOR_PORT",
-		"exec bash",
+		`exec "$@"`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("monitor shell script does not contain %q:\n%s", expected, script)

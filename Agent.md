@@ -20,17 +20,21 @@ Keep the tool fast, predictable, and easy to distribute as one binary.
 
 ## Current architecture
 
-- `cmd/agentwisp/main.go` is only the process entrypoint.
+- `cmd/agentwisp/main.go` and `cmd/agw/main.go` are process entrypoints for the same CLI.
+- `internal/agentwisp/agent.go` validates provider selection and starts an installed agent in a workspace.
 - `internal/agentwisp/cli.go` parses commands and dispatches workflows.
-- `internal/agentwisp/config.go` contains stable identifiers and small shared types.
+- `internal/agentwisp/config.go` contains container naming and discovery constants.
+- `internal/agentwisp/model.go` separates workspace identity, agent execution, and client attachment metadata.
+- `internal/agentwisp/inventory.go` exposes the versioned, allowlisted JSON inventory and exact workspace ID lookup.
 - `internal/agentwisp/command.go` wraps external command execution.
-- `internal/agentwisp/container.go` integrates with Apple's `container` CLI and parses inspect output.
-- `internal/agentwisp/workspace.go` starts, attaches to, and resolves workspace selection behavior.
+- `internal/agentwisp/runtime.go` defines the runtime contract, typed failures, and Apple command adapter.
+- `internal/agentwisp/container.go` implements Apple inventory and parses inspect output.
+- `internal/agentwisp/workspace.go` provides the shared workspace service used by CLI and TUI.
+- `internal/agentwisp/service_test.go` checks lifecycle policy using an injected fake runtime and monitor.
 - `internal/agentwisp/terminal.go` owns terminal mode, key parsing, and terminal width detection.
 - `internal/agentwisp/tui.go` renders and runs the workspace manager UI.
 - `internal/agentwisp/main_test.go` contains parser, layout, keyboard, and command help tests.
 - `security.md` defines dependency and container security policy.
-- `Investigation.md` tracks larger product/security ideas before implementation.
 - `go.mod` intentionally has no third-party dependencies.
 
 Managed containers use:
@@ -40,7 +44,7 @@ Managed containers use:
 - label `dev.agentwisp.workspace=<host-path>`;
 - host project mounted at `/workspace`;
 - working directory `/workspace`;
-- default image `docker.io/library/node:22-bookworm`, overridden by `AGENTWISP_IMAGE` for new containers;
+- default image `agentwisp-agents:local`, built from `images/agents`, overridden by `AGENTWISP_IMAGE` for new containers; existing containers retain their image;
 - new names include a canonical-path hash; legacy containers are matched by path.
 
 Older `codex-work-*` containers and `dev.codexbox.*` labels must remain
@@ -49,12 +53,15 @@ discoverable. Containers without labels must remain discoverable through their
 
 ## Required behavior
 
-- `agentwisp` opens the TUI workspace manager.
+- `agentwisp` and `agw` open the same TUI workspace manager.
+- `agw agent claude|codex [-- args...]` uses an existing workspace and preserves argv boundaries.
+- Never automatically pass agent permission-bypass flags or mount host credentials.
 - `agentwisp add`, `start`, and `run` create/start the current workspace and enter
   it.
 - `agentwisp shell`, `stop`, and `rm` operate on the current directory workspace.
 - `agentwisp help` documents commands, aliases, and TUI controls.
 - `list`, `ls`, and `.` remain manager aliases unless intentionally deprecated.
+- `list --json` and `inspect <id> --json` are read-only; JSON stdout is separate from errors on stderr. Never expose raw inspect or monitor credentials.
 - Enter starts a stopped workspace or attaches to a running one.
 - `S` stops the selected running workspace and disables its traffic monitor proxy
   without closing the TUI.
@@ -115,10 +122,11 @@ dependency review, and `govulncheck`.
 Run before handing off a change:
 
 ```sh
-gofmt -w cmd/agentwisp internal/agentwisp
+gofmt -w cmd/agentwisp cmd/agw internal/agentwisp
 go vet ./...
 go test ./...
 go build -o /tmp/agentwisp-check ./cmd/agentwisp
+go build -o /tmp/agw-check ./cmd/agw
 ```
 
 After dependency changes also run:
@@ -172,9 +180,7 @@ Potential features should be implemented incrementally:
 - rename or display a friendly workspace name;
 - validated image presets and reproducible digest-pinned releases;
 - persisted project configuration;
-- search/filter for large workspace lists;
 - sorting options;
-- image digest pinning;
 - better non-interactive output for scripts.
 
 Do not combine unrelated features into one large refactor.

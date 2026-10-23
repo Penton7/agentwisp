@@ -29,16 +29,24 @@ func TestAppleRuntimePreservesArgv(t *testing.T) {
 	c := &recordingCommands{}
 	r := &appleRuntime{commands: c}
 	command := []string{"claude", "a prompt with spaces; $(touch /tmp/never)", "--model", "example model"}
-	req := RuntimeLaunch{Name: "agentwisp-work-test", Image: "custom:local", HostPath: "/project space/$(not-shell)", Command: command, EnvFile: "/private/env file"}
-	if err := r.Launch(req, io.Discard); err != nil {
+	create := RuntimeCreate{Name: "agentwisp-work-test", Image: "custom:local", HostPath: "/project space/$(not-shell)"}
+	if err := r.Create(create); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"container", "run", "-it", "--name", req.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + req.HostPath, "--volume", req.HostPath + ":/workspace", "--workdir", "/workspace", "--env-file", req.EnvFile, req.Image}
-	want = append(want, command...)
+	// The container's main process must not be the user's shell: exiting the
+	// first shell would otherwise stop the container under other sessions.
+	want := []string{"container", "run", "--detach", "--name", create.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + create.HostPath, "--volume", create.HostPath + ":/workspace", "--workdir", "/workspace", create.Image, "sh", "-c", keepAliveScript}
 	if !reflect.DeepEqual(c.argv, want) {
 		t.Fatalf("got %q want %q", c.argv, want)
 	}
-	req.Image = ""
+	req := RuntimeLaunch{Name: create.Name, Command: command, EnvFile: "/private/env file"}
+	if err := r.Launch(req, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	want = append([]string{"container", "exec", "-it", "--workdir", "/workspace", "--env-file", req.EnvFile, req.Name}, command...)
+	if !reflect.DeepEqual(c.argv, want) {
+		t.Fatalf("got %q want %q", c.argv, want)
+	}
 	req.EnvFile = ""
 	if err := r.Launch(req, io.Discard); err != nil {
 		t.Fatal(err)

@@ -26,7 +26,8 @@ func NewWorkspaceService(runtime Runtime, monitor Monitor) *WorkspaceService {
 	return &WorkspaceService{runtime: runtime, monitor: monitor}
 }
 func defaultWorkspaceService() *WorkspaceService {
-	return NewWorkspaceService(newAppleRuntime(), workspaceMonitor{})
+	runtime := newAppleRuntime()
+	return NewWorkspaceService(runtime, workspaceMonitor{addresses: runtime.Addresses})
 }
 func (s *WorkspaceService) List() ([]Workspace, error) { return s.runtime.List() }
 func (s *WorkspaceService) require(name string) error {
@@ -107,7 +108,11 @@ func (s *WorkspaceService) Open(name, cwd string, out, errOut io.Writer) error {
 		if strings.ContainsAny(cwd, ":\r\n") {
 			return fmt.Errorf("workspace path contains unsupported volume delimiter")
 		}
-		return s.launch(RuntimeLaunch{Name: name, Image: image, HostPath: cwd, Command: []string{"bash"}}, errOut)
+		fmt.Fprintf(out, "Creating %s...\n", name)
+		if err := s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd}); err != nil {
+			return err
+		}
+		return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)
 	}
 	if err := s.ensureStarted(name, out); err != nil {
 		return err

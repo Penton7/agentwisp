@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,7 +39,9 @@ func (f *fakeRuntime) Remove(_ string, force bool) error {
 	}
 	return f.record("remove")
 }
-func (f *fakeRuntime) CheckAgent(string, string) error { return f.record("check-agent") }
+func (f *fakeRuntime) Create(RuntimeCreate) error         { return f.record("create") }
+func (f *fakeRuntime) Addresses(string) ([]net.IP, error) { return nil, f.record("addresses") }
+func (f *fakeRuntime) CheckAgent(string, string) error    { return f.record("check-agent") }
 func (f *fakeRuntime) Launch(req RuntimeLaunch, _ io.Writer) error {
 	f.launched = req
 	return f.record("launch")

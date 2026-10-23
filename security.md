@@ -112,9 +112,10 @@ Do not allow arbitrary TCP tunneling without a separate explicit opt-in.
 Proxy lifecycle should use authenticated health/shutdown requests. Do not rely
 only on PID checks because PIDs can be reused by unrelated processes.
 
-Prefer binding the proxy to the narrowest host interface reachable by Apple
-containers. `0.0.0.0` is compatible but broader than ideal; use
-`AGENTWISP_PROXY_LISTEN_HOST` when the bridge/interface address is known.
+The proxy binds to the host's address on the workspace container network,
+selected by matching the container's reported address against the host's own
+interfaces. Container-reported addresses are never bound or dialed directly.
+`0.0.0.0` is available only as an explicit `AGENTWISP_PROXY_LISTEN_HOST` opt-in.
 
 Do not add transparent TLS interception or custom CA installation without a
 separate explicit design review and user confirmation flow.
