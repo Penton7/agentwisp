@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +29,7 @@ const (
 	monitorConfigFile     = "monitor.json"
 	monitorLogFile        = "traffic.ndjson"
 	monitorLockFile       = "monitor.lock"
+	lifecycleLockFile     = "lifecycle.lock"
 	monitorProxyLogFile   = "proxy.log"
 	monitorAuthUser       = "agentwisp"
 	monitorHealthPath     = "/agentwisp-health"
@@ -45,6 +48,9 @@ type monitorConfig struct {
 	PID          int    `json:"pid"`
 	Token        string `json:"token"`
 	AllowPrivate bool   `json:"allow_private"`
+	// AllowHosts, when non-empty, is the only set of destinations the proxy
+	// forwards to: exact names or "*.example.com" for subdomains.
+	AllowHosts []string `json:"allow_hosts,omitempty"`
 }
 
 // Variable so tests can exercise contention without long waits.
@@ -99,6 +105,7 @@ func handleMonitorCommand(args []string, workspaceName string, addresses address
 			fmt.Fprintf(out, "Proxy: %s\n", proxyDescription(cfg))
 		}
 		fmt.Fprintf(out, "Private LAN: %s\n", privateLANStatus(cfg))
+		fmt.Fprintf(out, "Allowlist: %s\n", allowlistDescription(cfg))
 		fmt.Fprintln(out, "Logs: "+monitorLogPath(workspaceName))
 		fmt.Fprintln(out, "Note: existing shells need to be reopened through agentwisp to receive proxy env.")
 		return nil
@@ -134,6 +141,7 @@ func printMonitorStatus(workspaceName string, out io.Writer) error {
 	fmt.Fprintf(out, "Proxy: %s\n", proxyDescription(cfg))
 	fmt.Fprintf(out, "Private LAN: %s\n", privateLANStatus(cfg))
 	fmt.Fprintf(out, "Blocks: %s\n", monitorBlockedDestinations(cfg))
+	fmt.Fprintf(out, "Allowlist: %s\n", allowlistDescription(cfg))
 	fmt.Fprintf(out, "PID: %d\n", cfg.PID)
 	fmt.Fprintln(out, "Logs: "+monitorLogPath(workspaceName))
 	return nil
@@ -164,6 +172,7 @@ func monitorTUIStatus(workspaces []Workspace, selected int) string {
 
 type monitorOnOptions struct {
 	AllowPrivate bool
+	AllowHosts   []string
 }
 
 func parseMonitorOnOptions(args []string) (monitorOnOptions, error) {
@@ -172,8 +181,22 @@ func parseMonitorOnOptions(args []string) (monitorOnOptions, error) {
 		switch arg {
 		case "--allow-private":
 			options.AllowPrivate = true
+		case "--allow":
+			return monitorOnOptions{}, fmt.Errorf("--allow requires a value: --allow=host1,*.host2")
 		default:
-			return monitorOnOptions{}, fmt.Errorf("unknown monitor on option %q", arg)
+			value, ok := strings.CutPrefix(arg, "--allow=")
+			if !ok {
+				return monitorOnOptions{}, fmt.Errorf("unknown monitor on option %q", arg)
+			}
+			for _, pattern := range strings.Split(value, ",") {
+				pattern = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pattern)), ".")
+				if !validHostPattern(pattern) {
+					return monitorOnOptions{}, fmt.Errorf("invalid --allow host %q: use example.com or *.example.com", pattern)
+				}
+				if !slices.Contains(options.AllowHosts, pattern) {
+					options.AllowHosts = append(options.AllowHosts, pattern)
+				}
+			}
 		}
 	}
 	return options, nil
@@ -183,10 +206,21 @@ func parseMonitorOnOptions(args []string) (monitorOnOptions, error) {
 // processes, so two shells opened at once cannot start two proxies. Only the
 // public lifecycle entry points lock; *Locked helpers expect the lock held.
 func lockMonitorState(workspaceName string) (func(), error) {
+	return lockWorkspaceFile(workspaceName, monitorLockFile, "monitor state")
+}
+
+// lockWorkspaceLifecycle serializes container create/start/stop/remove.
+func lockWorkspaceLifecycle(workspaceName string) (func(), error) {
+	return lockWorkspaceFile(workspaceName, lifecycleLockFile, "workspace lifecycle")
+}
+
+// flock belongs to the open file description, so separate opens contend even
+// within one process. Files are opened close-on-exec: the proxy never inherits.
+func lockWorkspaceFile(workspaceName, fileName, what string) (func(), error) {
 	if err := ensureMonitorStateDir(workspaceName); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(monitorStateDir(workspaceName), monitorLockFile)
+	path := filepath.Join(monitorStateDir(workspaceName), fileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
@@ -202,11 +236,11 @@ func lockMonitorState(workspaceName string) (func(), error) {
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			file.Close()
-			return nil, fmt.Errorf("lock monitor state: %w", err)
+			return nil, fmt.Errorf("lock %s: %w", what, err)
 		}
 		if time.Now().After(deadline) {
 			file.Close()
-			return nil, fmt.Errorf("monitor state for %s is busy in another agentwisp process", workspaceName)
+			return nil, fmt.Errorf("%s for %s is busy in another agentwisp process", what, workspaceName)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -222,9 +256,11 @@ func enableMonitor(workspaceName string, options monitorOnOptions, addresses add
 	if err != nil {
 		return monitorConfig{}, err
 	}
-	restart := cfg.Enabled && cfg.AllowPrivate != options.AllowPrivate
+	// The proxy reads policy once at start, so a policy change restarts it.
+	restart := cfg.Enabled && (cfg.AllowPrivate != options.AllowPrivate || !slices.Equal(cfg.AllowHosts, options.AllowHosts))
 	cfg.Enabled = true
 	cfg.AllowPrivate = options.AllowPrivate
+	cfg.AllowHosts = options.AllowHosts
 	if cfg.Token == "" {
 		token, err := randomMonitorToken()
 		if err != nil {
@@ -606,6 +642,7 @@ func runMonitorProxyCommand(args []string, out, errOut io.Writer) error {
 		logPath:      monitorLogPath(workspaceName),
 		token:        cfg.Token,
 		allowPrivate: cfg.AllowPrivate,
+		allowHosts:   cfg.AllowHosts,
 		transport:    directHTTPTransport(cfg.AllowPrivate),
 		slots:        make(chan struct{}, monitorMaxRequests),
 	}
@@ -633,6 +670,7 @@ type trafficProxy struct {
 	logPath      string
 	token        string
 	allowPrivate bool
+	allowHosts   []string
 	transport    http.RoundTripper
 	shutdown     func()
 	logMu        sync.Mutex
@@ -688,6 +726,11 @@ func (p *trafficProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !hostAllowed(target, p.allowHosts) {
+		http.Error(w, "destination not in allowlist", http.StatusForbidden)
+		p.log(trafficEventFromRequest(r, p.workspace, start, 0, 0, "deny", errNotAllowlisted))
+		return
+	}
 	upstream, err := dialProxyTarget(r.Context(), target, p.allowPrivate)
 	if err != nil {
 		status := http.StatusBadGateway
@@ -746,6 +789,11 @@ func (p *trafficProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if outReq.URL.Scheme != "http" {
 		http.Error(w, "unsupported proxy scheme", http.StatusBadRequest)
 		p.log(trafficEventFromRequest(r, p.workspace, start, 0, 0, "deny", errors.New("unsupported proxy scheme")))
+		return
+	}
+	if !hostAllowed(outReq.URL.Host, p.allowHosts) {
+		http.Error(w, "destination not in allowlist", http.StatusForbidden)
+		p.log(trafficEventFromRequest(r, p.workspace, start, 0, 0, "deny", errNotAllowlisted))
 		return
 	}
 	removeHopByHopHeaders(outReq.Header)
@@ -1091,6 +1139,51 @@ func basicProxyAuthorization(token string) string {
 
 var errBlockedProxyDestination = errors.New("blocked local proxy destination")
 
+var errNotAllowlisted = errors.New("destination not in allowlist")
+
+var hostPatternLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func validHostPattern(pattern string) bool {
+	if ip := net.ParseIP(pattern); ip != nil {
+		return true
+	}
+	pattern = strings.TrimPrefix(pattern, "*.")
+	labels := strings.Split(pattern, ".")
+	if len(labels) < 2 || len(pattern) > 253 {
+		return false // Reject "*" and bare TLD wildcards like "*.com"-only labels.
+	}
+	for _, label := range labels {
+		if !hostPatternLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// hostAllowed applies the allowlist to a request host[:port]. An empty list
+// allows everything (monitor-only mode). "*.example.com" matches subdomains,
+// not example.com itself. Matching is on the requested name, before DNS.
+func hostAllowed(hostport string, allowHosts []string) bool {
+	if len(allowHosts) == 0 {
+		return true
+	}
+	host := hostport
+	if name, _, err := net.SplitHostPort(hostport); err == nil {
+		host = name
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	for _, pattern := range allowHosts {
+		if suffix, ok := strings.CutPrefix(pattern, "*"); ok {
+			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+				return true
+			}
+		} else if host == pattern {
+			return true
+		}
+	}
+	return false
+}
+
 func blockedProxyDestination(hostport string, allowPrivate bool) (bool, string) {
 	_, err := resolveAllowedProxyIPs(context.Background(), hostport, allowPrivate)
 	if err == nil {
@@ -1222,6 +1315,14 @@ func isInternalMonitorRequest(r *http.Request, path string) bool {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func allowlistDescription(cfg monitorConfig) string {
+	if len(cfg.AllowHosts) == 0 {
+		return "off (all public destinations; monitor only)"
+	}
+	// Only proxy-aware clients are limited; this is not network enforcement.
+	return strings.Join(cfg.AllowHosts, ", ") + " (proxy clients only, not enforced)"
 }
 
 func privateLANStatus(cfg monitorConfig) string {

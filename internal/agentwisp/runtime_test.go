@@ -20,6 +20,10 @@ func (c *recordingCommands) Output(name string, args ...string) ([]byte, error) 
 	c.argv = append([]string{name}, args...)
 	return nil, c.failure
 }
+func (c *recordingCommands) Stream(_ io.Writer, name string, args ...string) error {
+	c.argv = append([]string{name}, args...)
+	return c.failure
+}
 func (c *recordingCommands) Interactive(_ io.Writer, name string, args ...string) error {
 	c.argv = append([]string{name}, args...)
 	return c.failure
@@ -29,13 +33,14 @@ func TestAppleRuntimePreservesArgv(t *testing.T) {
 	c := &recordingCommands{}
 	r := &appleRuntime{commands: c}
 	command := []string{"claude", "a prompt with spaces; $(touch /tmp/never)", "--model", "example model"}
-	create := RuntimeCreate{Name: "agentwisp-work-test", Image: "custom:local", HostPath: "/project space/$(not-shell)"}
+	create := RuntimeCreate{Name: "agentwisp-work-test", Image: "custom:local", HostPath: "/project space/$(not-shell)",
+		Mounts: []RuntimeMount{{Host: "/state/home/claude", Container: "/home/node/.claude"}}}
 	if err := r.Create(create); err != nil {
 		t.Fatal(err)
 	}
 	// The container's main process must not be the user's shell: exiting the
 	// first shell would otherwise stop the container under other sessions.
-	want := []string{"container", "run", "--detach", "--name", create.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + create.HostPath, "--volume", create.HostPath + ":/workspace", "--workdir", "/workspace", create.Image, "sh", "-c", keepAliveScript}
+	want := []string{"container", "run", "--detach", "--name", create.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + create.HostPath, "--volume", create.HostPath + ":/workspace", "--volume", "/state/home/claude:/home/node/.claude", "--workdir", "/workspace", create.Image, "sh", "-c", keepAliveScript}
 	if !reflect.DeepEqual(c.argv, want) {
 		t.Fatalf("got %q want %q", c.argv, want)
 	}
@@ -54,6 +59,14 @@ func TestAppleRuntimePreservesArgv(t *testing.T) {
 	want = append([]string{"container", "exec", "-it", "--workdir", "/workspace", req.Name}, command...)
 	if !reflect.DeepEqual(c.argv, want) {
 		t.Fatalf("got %q want %q", c.argv, want)
+	}
+}
+func TestAppleRuntimeRejectsMountDelimiters(t *testing.T) {
+	r := &appleRuntime{commands: &recordingCommands{}}
+	for _, mount := range []RuntimeMount{{Host: "/a:b", Container: "/x"}, {Host: "/a", Container: "relative"}, {Host: "/a", Container: "/x:ro"}} {
+		if err := r.Create(RuntimeCreate{Name: "agentwisp-work-test", Image: "i", HostPath: "/p", Mounts: []RuntimeMount{mount}}); err == nil {
+			t.Fatalf("accepted %+v", mount)
+		}
 	}
 }
 func TestAppleRuntimeErrorKinds(t *testing.T) {

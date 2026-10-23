@@ -31,6 +31,8 @@ Keep the tool fast, predictable, and easy to distribute as one binary.
 - `internal/agentwisp/container.go` implements Apple inventory and parses inspect output.
 - `internal/agentwisp/workspace.go` provides the shared workspace service used by CLI and TUI.
 - `internal/agentwisp/service_test.go` checks lifecycle policy using an injected fake runtime and monitor.
+- `internal/agentwisp/task.go` implements isolated task clones and bundle-based fetch.
+- `internal/agentwisp/status.go` installs agent status hooks, reads untrusted status files, and implements `agw watch`.
 - `internal/agentwisp/terminal.go` owns terminal mode, key parsing, and terminal width detection.
 - `internal/agentwisp/tui.go` renders and runs the workspace manager UI.
 - `internal/agentwisp/main_test.go` contains parser, layout, keyboard, and command help tests.
@@ -59,6 +61,9 @@ discoverable. Containers without labels must remain discoverable through their
 - `agentwisp add`, `start`, and `run` create/start the current workspace and enter
   it.
 - `agentwisp shell`, `stop`, and `rm` operate on the current directory workspace.
+- New containers run a keep-alive main process; shells and agents are always `exec` sessions.
+- Create/start/stop/remove hold the per-workspace lifecycle lock, never an interactive session. Lock order: lifecycle, then monitor.
+- Never run host git inside a task clone; host git runs only in the main repository with hooks and fsmonitor disabled.
 - `agentwisp help` documents commands, aliases, and TUI controls.
 - `list`, `ls`, and `.` remain manager aliases unless intentionally deprecated.
 - `list --json` and `inspect <id> --json` are read-only; JSON stdout is separate from errors on stderr. Never expose raw inspect or monitor credentials.

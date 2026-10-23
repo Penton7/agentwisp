@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
+	"strings"
 	"syscall"
 )
 
@@ -21,6 +23,9 @@ type Runtime interface {
 	Create(RuntimeCreate) error
 	Addresses(string) ([]net.IP, error)
 	CheckAgent(string, string) error
+	// Exec runs a non-interactive command in a running container and streams
+	// its stdout; it is used for data export, never for user shells.
+	Exec(name string, command []string, stdout io.Writer) error
 	Launch(RuntimeLaunch, io.Writer) error
 }
 
@@ -31,6 +36,12 @@ type RuntimeCreate struct {
 	Name     string
 	Image    string
 	HostPath string
+	Mounts   []RuntimeMount // Additional host directories, e.g. agent auth.
+}
+
+type RuntimeMount struct {
+	Host      string
+	Container string
 }
 
 // RuntimeLaunch is an interactive exec session in an existing container.
@@ -77,12 +88,16 @@ func runtimeError(op string, err error) error {
 
 type runtimeCommands interface {
 	Output(string, ...string) ([]byte, error)
+	Stream(io.Writer, string, ...string) error
 	Interactive(io.Writer, string, ...string) error
 }
 type hostCommands struct{}
 
 func (hostCommands) Output(name string, args ...string) ([]byte, error) {
 	return commandOutput(name, args...)
+}
+func (hostCommands) Stream(stdout io.Writer, name string, args ...string) error {
+	return commandStream(stdout, name, args...)
 }
 func (hostCommands) Interactive(out io.Writer, name string, args ...string) error {
 	return execInteractive(out, name, args...)
@@ -113,11 +128,25 @@ func (r *appleRuntime) Create(req RuntimeCreate) error {
 	if !validWorkspaceName(req.Name) || req.Image == "" || req.HostPath == "" {
 		return fmt.Errorf("invalid runtime create")
 	}
-	_, err := r.output("run", "--detach", "--name", req.Name,
-		"--label", managedLabel+"=true", "--label", workspaceLabel+"="+req.HostPath,
-		"--volume", req.HostPath+":/workspace", "--workdir", "/workspace",
-		req.Image, "sh", "-c", keepAliveScript)
+	args := []string{"run", "--detach", "--name", req.Name,
+		"--label", managedLabel + "=true", "--label", workspaceLabel + "=" + req.HostPath,
+		"--volume", req.HostPath + ":/workspace"}
+	for _, mount := range req.Mounts {
+		if strings.ContainsAny(mount.Host+mount.Container, ":\r\n") || !path.IsAbs(mount.Container) {
+			return fmt.Errorf("invalid runtime mount")
+		}
+		args = append(args, "--volume", mount.Host+":"+mount.Container)
+	}
+	args = append(args, "--workdir", "/workspace", req.Image, "sh", "-c", keepAliveScript)
+	_, err := r.output(args...)
 	return err
+}
+func (r *appleRuntime) Exec(name string, command []string, stdout io.Writer) error {
+	if !validWorkspaceName(name) || len(command) == 0 {
+		return fmt.Errorf("invalid runtime exec")
+	}
+	args := append([]string{"exec", "--workdir", "/workspace", name}, command...)
+	return runtimeError("exec", r.commands.Stream(stdout, "container", args...))
 }
 func (r *appleRuntime) Launch(req RuntimeLaunch, errOut io.Writer) error {
 	if !validWorkspaceName(req.Name) || len(req.Command) == 0 {

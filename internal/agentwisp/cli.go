@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func Execute(args []string, in io.Reader, out, errOut io.Writer) error {
@@ -37,6 +39,21 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 	case "help", "-h", "--help":
 		printUsage(out)
 		return nil
+	case "watch":
+		notify := true
+		for _, arg := range args[1:] {
+			if arg != "--no-notify" {
+				return fmt.Errorf("usage: agw watch [--no-notify]")
+			}
+			notify = false
+		}
+		stop := make(chan struct{})
+		interrupts := make(chan os.Signal, 1)
+		signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(interrupts)
+		go func() { <-interrupts; close(stop) }()
+		fmt.Fprintln(out, "Watching agent sessions started with `agw agent`; Ctrl-C stops.")
+		return service.Watch(notify, out, stop)
 	}
 
 	cwd, err := os.Getwd()
@@ -84,13 +101,15 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 		}
 		return service.Stop(resolved)
 	case "rm", "remove":
-		force, yes := false, false
+		force, yes, purge := false, false, false
 		for _, arg := range args[1:] {
 			switch arg {
 			case "--force", "-f":
 				force = true
 			case "--yes", "-y":
 				yes = true
+			case "--purge":
+				purge = true
 			default:
 				return fmt.Errorf("unknown rm option %q", arg)
 			}
@@ -100,7 +119,7 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 			return err
 		}
 		if !yes {
-			fmt.Fprintf(out, "Remove %s? Container files and credentials will be lost; host project files and traffic logs are kept.\nType the container name to confirm: ", resolved)
+			fmt.Fprintf(out, "Remove %s? Container files will be lost; host project files, traffic logs and saved agent logins are kept.\nType the container name to confirm: ", resolved)
 			line, err := bufio.NewReader(in).ReadString('\n')
 			if err != nil && err != io.EOF {
 				return err
@@ -113,8 +132,17 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 		if err := service.Remove(resolved, force); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Removed %s. Host project files and traffic logs kept.\n", resolved)
+		if purge {
+			if err := PurgeState(resolved); err != nil {
+				return fmt.Errorf("removed %s, but purging saved agent logins failed: %w", resolved, err)
+			}
+			fmt.Fprintf(out, "Removed %s and its saved agent logins. Host project files and traffic logs kept.\n", resolved)
+			return nil
+		}
+		fmt.Fprintf(out, "Removed %s. Host project files, traffic logs and saved agent logins kept (--purge deletes logins).\n", resolved)
 		return nil
+	case "task":
+		return handleTaskCommand(service, args[1:], cwd, in, out)
 	case "monitor":
 		resolved, err := service.Resolve(cwd)
 		if err != nil {
@@ -140,11 +168,18 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  agentwisp shell        Enter the current directory workspace")
 	fmt.Fprintln(out, "  agw agent claude [-- args...]  Run Claude Code in the current workspace")
 	fmt.Fprintln(out, "  agw agent codex [-- args...]   Run Codex in the current workspace")
+	fmt.Fprintln(out, "  agw task new <name> [--from <ref>]  Clone the repo into ../<repo>-<name> with its own workspace")
+	fmt.Fprintln(out, "  agw task list          List tasks of the current repository")
+	fmt.Fprintln(out, "  agw task fetch <name>  Bring branch agw/<name> back as a git bundle")
+	fmt.Fprintln(out, "  agw task rm <name> [--yes] [--force]  Remove task clone and workspace")
+	fmt.Fprintln(out, "  agw watch [--no-notify]  Notify when an agent needs input or finishes a turn")
 	fmt.Fprintln(out, "  agentwisp stop         Stop the current directory workspace")
-	fmt.Fprintln(out, "  agentwisp rm [--force] [--yes]  Remove current workspace (prompts by default)")
-	fmt.Fprintln(out, "                        --force allows running; --yes skips confirmation")
+	fmt.Fprintln(out, "  agentwisp rm [--force] [--yes] [--purge]  Remove current workspace (prompts by default)")
+	fmt.Fprintln(out, "                        --force allows running; --yes skips confirmation;")
+	fmt.Fprintln(out, "                        --purge also deletes saved agent logins")
 	fmt.Fprintln(out, "  agentwisp monitor on   Enable metadata-only traffic logging")
 	fmt.Fprintln(out, "  agentwisp monitor on --allow-private")
+	fmt.Fprintln(out, "  agentwisp monitor on --allow=github.com,*.npmjs.org  Forward only these hosts")
 	fmt.Fprintln(out, "  agentwisp monitor off  Disable traffic logging")
 	fmt.Fprintln(out, "  agentwisp monitor logs Show traffic logs for the current workspace")
 	fmt.Fprintln(out, "  agentwisp monitor clear Clear traffic logs for the current workspace")
