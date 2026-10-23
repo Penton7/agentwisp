@@ -12,14 +12,14 @@ import (
 	"text/tabwriter"
 )
 
-func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
+func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Writer) error {
 	if in != os.Stdin || out != os.Stdout {
-		return chooseWorkspaceByNumber(in, out, errOut)
+		return chooseWorkspaceByNumber(service, in, out, errOut)
 	}
 
 	term, err := enterRawTerminal()
 	if err != nil {
-		return chooseWorkspaceByNumber(in, out, errOut)
+		return chooseWorkspaceByNumber(service, in, out, errOut)
 	}
 	defer term.restore()
 
@@ -32,18 +32,13 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 	}()
 
 	interrupts := make(chan os.Signal, 1)
-	signal.Notify(interrupts, os.Interrupt, syscall.SIGWINCH)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM, syscall.SIGWINCH)
 	defer signal.Stop(interrupts)
 
 	reader := bufio.NewReader(in)
-	workspaces, err := listWorkspaces()
+	workspaces, err := service.List()
 	if err != nil {
 		return err
-	}
-	if len(workspaces) == 0 {
-		renderEmptyTUI(out)
-		_, _ = readTUIKey(reader)
-		return nil
 	}
 
 	selected := 0
@@ -52,9 +47,14 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 	keyCh := make(chan tuiKey, 1)
 	errCh := make(chan error, 1)
 	readingKey := false
+	var pendingDelete *Workspace
 
 	for {
-		renderTUIWithMonitorStatus(out, workspaces, selected, message, width, monitorTUIStatus(workspaces, selected))
+		if pendingDelete != nil {
+			renderDeleteConfirmation(out, *pendingDelete, width)
+		} else {
+			renderTUIWithMonitorStatus(out, workspaces, selected, message, width, monitorTUIStatus(workspaces, selected))
+		}
 		message = ""
 
 		if !readingKey {
@@ -84,6 +84,26 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 			return readErr
 		case key := <-keyCh:
 			readingKey = false
+			if pendingDelete != nil {
+				chosen := *pendingDelete
+				pendingDelete = nil
+				if key != keyConfirm {
+					message = "Removal cancelled"
+					continue
+				}
+				if err := service.Remove(chosen.Name, true); err != nil {
+					message = "Removal failed: " + err.Error()
+					continue
+				}
+				// Remove locally first so refresh failure cannot leave a deleted row selected.
+				workspaces = append(workspaces[:selected], workspaces[selected+1:]...)
+				selected = min(selected, max(0, len(workspaces)-1))
+				message = "Removed " + chosen.Name + "; host files and logs kept"
+				continue
+			}
+			if len(workspaces) == 0 && key != keyRefresh && key != keyQuit {
+				continue
+			}
 			switch key {
 			case keyUp:
 				selected--
@@ -95,21 +115,21 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 				if selected >= len(workspaces) {
 					selected = 0
 				}
+			case keyDelete:
+				chosen := workspaces[selected]
+				pendingDelete = &chosen
 			case keyRefresh:
-				refreshed, refreshErr := listWorkspaces()
+				selectedName := ""
+				if len(workspaces) > 0 {
+					selectedName = workspaces[selected].Name
+				}
+				refreshed, refreshErr := service.List()
 				if refreshErr != nil {
 					message = "Refresh failed: " + refreshErr.Error()
 					continue
 				}
 				workspaces = refreshed
-				if len(workspaces) == 0 {
-					renderEmptyTUI(out)
-					_, _ = readTUIKey(reader)
-					return nil
-				}
-				if selected >= len(workspaces) {
-					selected = len(workspaces) - 1
-				}
+				selected = workspaceIndex(workspaces, selectedName)
 				message = "Statuses refreshed"
 			case keyStop:
 				chosen := workspaces[selected]
@@ -119,31 +139,25 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 				}
 
 				renderTUIWithMonitorStatus(out, workspaces, selected, "Stopping "+chosen.Name+"...", width, monitorTUIStatus(workspaces, selected))
-				if stopErr := stopWorkspace(chosen.Name); stopErr != nil {
+				stopErr := service.Stop(chosen.Name)
+				message = chosen.Name + " stopped; proxy stopped"
+				if stopErr != nil {
 					message = "Stop failed: " + stopErr.Error()
-					continue
-				}
-				proxyMessage := ""
-				if proxyErr := disableMonitor(chosen.Name); proxyErr != nil {
-					proxyMessage = "; proxy stop failed: " + proxyErr.Error()
-				} else {
-					proxyMessage = "; proxy stopped"
 				}
 
-				refreshed, refreshErr := listWorkspaces()
+				refreshed, refreshErr := service.List()
 				if refreshErr != nil {
-					message = "Stopped" + proxyMessage + ", but refresh failed: " + refreshErr.Error()
+					message += "; refresh failed: " + refreshErr.Error()
 					continue
 				}
 				workspaces = refreshed
 				selected = workspaceIndex(workspaces, chosen.Name)
-				message = chosen.Name + " stopped" + proxyMessage
 			case keyEnter:
 				chosen := workspaces[selected]
 				term.restore()
 				fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
 				screenOpen = false
-				return enterWorkspace(chosen, out, errOut)
+				return service.Enter(chosen.Name, out, errOut)
 			case keyQuit:
 				return nil
 			}
@@ -151,8 +165,8 @@ func chooseWorkspace(in io.Reader, out, errOut io.Writer) error {
 	}
 }
 
-func chooseWorkspaceByNumber(in io.Reader, out, errOut io.Writer) error {
-	workspaces, err := listWorkspaces()
+func chooseWorkspaceByNumber(service *WorkspaceService, in io.Reader, out, errOut io.Writer) error {
+	workspaces, err := service.List()
 	if err != nil {
 		return err
 	}
@@ -166,13 +180,13 @@ func chooseWorkspaceByNumber(in io.Reader, out, errOut io.Writer) error {
 	return nil
 }
 
-func renderTUI(out io.Writer, workspaces []workspace, selected int, message string, width int) {
+func renderTUI(out io.Writer, workspaces []Workspace, selected int, message string, width int) {
 	renderTUIWithMonitorStatus(out, workspaces, selected, message, width, "")
 }
 
-func renderTUIWithMonitorStatus(out io.Writer, workspaces []workspace, selected int, message string, width int, monitorStatus string) {
-	if width < 20 {
-		width = 20
+func renderTUIWithMonitorStatus(out io.Writer, workspaces []Workspace, selected int, message string, width int, monitorStatus string) {
+	if width < 2 {
+		width = 2
 	}
 	// Keep the last terminal column empty. Writing into it can trigger an
 	// automatic wrap before the following newline in many terminal emulators.
@@ -184,7 +198,12 @@ func renderTUIWithMonitorStatus(out io.Writer, workspaces []workspace, selected 
 	screen.WriteString("\x1b[H\x1b[2J")
 	renderTitleBar(&screen, workspaces, panelWidth)
 
-	renderWorkspaceList(&screen, workspaces, selected, panelWidth)
+	if len(workspaces) == 0 {
+		screen.WriteString(truncateCell("No workspaces. R refresh, Q quit.", panelWidth))
+		screen.WriteString("\n")
+	} else {
+		renderWorkspaceList(&screen, workspaces, selected, panelWidth)
+	}
 
 	if monitorStatus != "" {
 		screen.WriteString("\n\x1b[38;5;250m")
@@ -201,17 +220,17 @@ func renderTUIWithMonitorStatus(out io.Writer, workspaces []workspace, selected 
 	fmt.Fprint(out, screen.String())
 }
 
-func adaptivePanelWidth(workspaces []workspace, terminalWidth int) int {
+func adaptivePanelWidth(workspaces []Workspace, terminalWidth int) int {
 	// The workspace manager is a full-screen TUI. Use all available columns
 	// instead of sizing the panel only to its current content; the VOLUME
 	// column receives the extra room on wide terminals.
-	if terminalWidth < 20 {
-		return 20
+	if terminalWidth < 1 {
+		return 1
 	}
 	return terminalWidth
 }
 
-func renderTitleBar(screen *strings.Builder, workspaces []workspace, width int) {
+func renderTitleBar(screen *strings.Builder, workspaces []Workspace, width int) {
 	running := 0
 	for _, item := range workspaces {
 		if item.Running {
@@ -242,7 +261,7 @@ func renderTitleBar(screen *strings.Builder, workspaces []workspace, width int) 
 	screen.WriteString("\x1b[0m\n")
 }
 
-func renderWorkspaceList(screen *strings.Builder, workspaces []workspace, selected, width int) {
+func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, selected, width int) {
 	const (
 		statusWidth = 8
 		actionWidth = 8
@@ -305,11 +324,21 @@ func renderWorkspaceList(screen *strings.Builder, workspaces []workspace, select
 	}
 }
 
-func renderNarrowWorkspaceList(screen *strings.Builder, workspaces []workspace, selected, width int) {
+func renderNarrowWorkspaceList(screen *strings.Builder, workspaces []Workspace, selected, width int) {
 	const (
 		statusWidth = 8
 		gapWidth    = 4
 	)
+	if width < statusWidth+gapWidth+1 {
+		for i, item := range workspaces {
+			prefix := "  "
+			if i == selected {
+				prefix = "> "
+			}
+			screen.WriteString(truncateCell(prefix+item.Name, width) + "\n")
+		}
+		return
+	}
 	nameWidth := width - statusWidth - gapWidth
 	gap := strings.Repeat(" ", gapWidth)
 
@@ -344,7 +373,7 @@ func renderNarrowWorkspaceList(screen *strings.Builder, workspaces []workspace, 
 	}
 }
 
-func desiredNameWidth(workspaces []workspace) int {
+func desiredNameWidth(workspaces []Workspace) int {
 	width := len([]rune("WORKSPACE"))
 	for _, item := range workspaces {
 		if itemWidth := len([]rune(item.Name)); itemWidth > width {
@@ -396,6 +425,7 @@ func renderKeyBar(screen *strings.Builder, width int) {
 		{key: "J/K", label: "Move"},
 		{key: "Enter", label: "Open"},
 		{key: "S", label: "Stop"},
+		{key: "D", label: "Delete"},
 		{key: "R", label: "Refresh"},
 		{key: "Q", label: "Quit"},
 	}
@@ -414,7 +444,7 @@ func renderKeyBar(screen *strings.Builder, width int) {
 	}
 }
 
-func printWorkspaces(out io.Writer, workspaces []workspace) {
+func printWorkspaces(out io.Writer, workspaces []Workspace) {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "#\tSTATUS\tCONTAINER\tWORKSPACE")
 	for i, item := range workspaces {
@@ -422,12 +452,15 @@ func printWorkspaces(out io.Writer, workspaces []workspace) {
 		if item.Running {
 			status = "running"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", i+1, status, item.Name, item.Path)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", i+1, status, terminalText(item.Name), terminalText(item.Path))
 	}
 	_ = w.Flush()
 }
 
 func fitCell(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	value = truncateCell(value, width)
 	runes := []rune(value)
 	return value + strings.Repeat(" ", width-len(runes))
@@ -437,6 +470,7 @@ func truncateCell(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
+	value = terminalText(value)
 	runes := []rune(value)
 	if len(runes) <= width {
 		return value
@@ -447,11 +481,33 @@ func truncateCell(value string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-func renderEmptyTUI(out io.Writer) {
-	fmt.Fprint(out,
-		"\x1b[H\x1b[2J",
-		"\x1b[1;36mAGENTWISP WORKSPACES\x1b[0m\n\n",
-		"No agentwisp workspaces found.\n\n",
-		"\x1b[2mPress any key to close\x1b[0m",
-	)
+// External paths, labels and errors must not control the terminal. Escape
+// non-ASCII too: this keeps CJK/combining/emoji paths within cell boundaries
+// without adding a terminal-width dependency. Actual paths stay unchanged.
+func terminalText(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if r >= 32 && r <= 126 {
+			out.WriteRune(r)
+		} else {
+			fmt.Fprintf(&out, "\\u{%x}", r)
+		}
+	}
+	return out.String()
+}
+
+func renderDeleteConfirmation(out io.Writer, chosen Workspace, width int) {
+	width = max(1, width-1)
+	fmt.Fprint(out, "\x1b[H\x1b[2J")
+	for _, line := range []string{
+		"DELETE WORKSPACE",
+		chosen.Name,
+		chosen.Path,
+		"Stops running container and proxy.",
+		"Container files/credentials: LOST.",
+		"Host project and traffic logs: KEPT.",
+		"Y: delete; any other key: cancel",
+	} {
+		fmt.Fprintln(out, truncateCell(line, width))
+	}
 }

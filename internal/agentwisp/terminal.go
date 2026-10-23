@@ -21,6 +21,8 @@ const (
 	keyEnter
 	keyRefresh
 	keyStop
+	keyDelete
+	keyConfirm
 	keyQuit
 )
 
@@ -69,6 +71,10 @@ func readTUIKey(reader *bufio.Reader) (tuiKey, error) {
 		return keyDown, nil
 	case 'r', 'R':
 		return keyRefresh, nil
+	case 'd', 'D':
+		return keyDelete, nil
+	case 'y', 'Y':
+		return keyConfirm, nil
 	case 's', 'S':
 		return keyStop, nil
 	case 'q', 'Q', 3:

@@ -112,14 +112,28 @@ Do not allow arbitrary TCP tunneling without a separate explicit opt-in.
 Proxy lifecycle should use authenticated health/shutdown requests. Do not rely
 only on PID checks because PIDs can be reused by unrelated processes.
 
-Prefer binding the proxy to the narrowest host interface reachable by Apple
-containers. `0.0.0.0` is compatible but broader than ideal; use
-`AGENTWISP_PROXY_LISTEN_HOST` when the bridge/interface address is known.
+The proxy binds to the host's address on the workspace container network,
+selected by matching the container's reported address against the host's own
+interfaces. Container-reported addresses are never bound or dialed directly.
+`0.0.0.0` is available only as an explicit `AGENTWISP_PROXY_LISTEN_HOST` opt-in.
 
 Do not add transparent TLS interception or custom CA installation without a
 separate explicit design review and user confirmation flow.
 
-## Reporting a vulnerability
+## Current security scope
+
+The current source review and remaining risks are recorded separately in
+[`docs/security-review-2026-09-08.md`](docs/security-review-2026-09-08.md).
+The proxy is an observation tool, not an enforced network sandbox. Writable
+workspace mounts include project secrets and Git metadata. Do not describe
+container isolation as protection against edits to the mounted project.
+
+Workspace deletion must confirm its data-loss scope, validate its target,
+stop the proxy before deleting the container, and preserve host source files.
+Proxy shutdown failures must retain state for retry. Runtime credentials and
+logs require separate retention and revocation decisions.
+
+## Vulnerability reports
 
 Do not publish exploitable details in a public issue before a fix is available.
 Send the maintainer a private report with the affected revision, reproduction

@@ -16,13 +16,13 @@ func commandOutput(name string, args ...string) ([]byte, error) {
 		return output, nil
 	}
 	if errors.Is(err, exec.ErrNotFound) {
-		return nil, fmt.Errorf("%s CLI not found", name)
+		return nil, fmt.Errorf("%s CLI not found: %w", name, err)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		message := strings.TrimSpace(string(exitErr.Stderr))
 		if message != "" {
-			return nil, fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), message)
+			return nil, fmt.Errorf("%s %s: %s: %w", name, strings.Join(args, " "), message, err)
 		}
 	}
 	return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
@@ -35,9 +35,11 @@ func execInteractive(errOut io.Writer, name string, args ...string) error {
 	cmd.Stderr = errOut
 	if err := cmd.Run(); err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("%s CLI not found", name)
+			return fmt.Errorf("%s CLI not found: %w", name, err)
 		}
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+		// Interactive arguments may contain prompts or credentials. Do not
+		// echo them into host error output or terminal scrollback.
+		return fmt.Errorf("%s interactive command failed: %w", name, err)
 	}
 	return nil
 }
