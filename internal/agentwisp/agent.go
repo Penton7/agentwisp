@@ -3,6 +3,7 @@ package agentwisp
 import (
 	"fmt"
 	"io"
+	"os"
 )
 
 func agentCommand(args []string) ([]string, error) {
@@ -26,11 +27,23 @@ func (s *WorkspaceService) RunAgent(name string, command []string, out, errOut i
 	if err := s.require(name); err != nil {
 		return err
 	}
-	if err := s.ensureStarted(name, out); err != nil {
+	if err := s.startLocked(name, out); err != nil {
 		return err
 	}
 	if err := s.runtime.CheckAgent(name, command[0]); err != nil {
 		return fmt.Errorf("cannot find or execute %s in workspace %s; use an image containing the agent: %w", command[0], name, err)
 	}
-	return s.launch(RuntimeLaunch{Name: name, Command: append([]string(nil), command...)}, errOut)
+	session, err := NewAgentSession(discoveredWorkspaceID(name), AgentProvider(command[0]), "/workspace")
+	if err != nil {
+		return err
+	}
+	hooked, err := withStatusHooks(command)
+	if err != nil {
+		return err
+	}
+	// Status is best effort and must never prevent the agent from starting.
+	_ = writeHostAgentStatus(name, session, "starting")
+	defer os.Remove(agentStatusPath(name, session))
+	launch := append([]string{"env", "AGENTWISP_SESSION=" + string(session.ID)}, hooked...)
+	return s.launch(RuntimeLaunch{Name: name, Command: launch}, errOut)
 }

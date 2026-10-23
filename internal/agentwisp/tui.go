@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 )
 
 func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Writer) error {
@@ -48,12 +50,21 @@ func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Wri
 	errCh := make(chan error, 1)
 	readingKey := false
 	var pendingDelete *Workspace
+	// Agent states change without key presses; poll the small status files.
+	ticker := time.NewTicker(agentStatusPoll)
+	defer ticker.Stop()
+	agents := workspaceAgentSummaries(workspaces)
+	sticky := ""
 
 	for {
 		if pendingDelete != nil {
 			renderDeleteConfirmation(out, *pendingDelete, width)
 		} else {
-			renderTUIWithMonitorStatus(out, workspaces, selected, message, width, monitorTUIStatus(workspaces, selected))
+			if message != "" {
+				sticky = message
+			}
+			renderTUIView(out, tuiView{workspaces: workspaces, selected: selected, message: sticky, width: width,
+				monitorStatus: monitorTUIStatus(workspaces, selected), agents: agents})
 		}
 		message = ""
 
@@ -70,6 +81,13 @@ func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Wri
 		}
 
 		select {
+		case <-ticker.C:
+			if updated := workspaceAgentSummaries(workspaces); !maps.Equal(updated, agents) {
+				agents = updated
+			} else {
+				// Avoid redrawing (and re-probing proxy health) when nothing changed.
+				continue
+			}
 		case received := <-interrupts:
 			if received == syscall.SIGWINCH {
 				width = terminalWidth()
@@ -84,6 +102,7 @@ func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Wri
 			return readErr
 		case key := <-keyCh:
 			readingKey = false
+			sticky = ""
 			if pendingDelete != nil {
 				chosen := *pendingDelete
 				pendingDelete = nil
@@ -129,6 +148,7 @@ func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Wri
 					continue
 				}
 				workspaces = refreshed
+				agents = workspaceAgentSummaries(workspaces)
 				selected = workspaceIndex(workspaces, selectedName)
 				message = "Statuses refreshed"
 			case keyStop:
@@ -185,6 +205,22 @@ func renderTUI(out io.Writer, workspaces []Workspace, selected int, message stri
 }
 
 func renderTUIWithMonitorStatus(out io.Writer, workspaces []Workspace, selected int, message string, width int, monitorStatus string) {
+	renderTUIView(out, tuiView{workspaces: workspaces, selected: selected, message: message, width: width, monitorStatus: monitorStatus})
+}
+
+// tuiView is one frame. agents maps container name to the most urgent agent
+// state; nil hides the AGENT column.
+type tuiView struct {
+	workspaces    []Workspace
+	selected      int
+	message       string
+	width         int
+	monitorStatus string
+	agents        map[string]string
+}
+
+func renderTUIView(out io.Writer, view tuiView) {
+	workspaces, selected, message, width, monitorStatus := view.workspaces, view.selected, view.message, view.width, view.monitorStatus
 	if width < 2 {
 		width = 2
 	}
@@ -202,7 +238,7 @@ func renderTUIWithMonitorStatus(out io.Writer, workspaces []Workspace, selected 
 		screen.WriteString(truncateCell("No workspaces. R refresh, Q quit.", panelWidth))
 		screen.WriteString("\n")
 	} else {
-		renderWorkspaceList(&screen, workspaces, selected, panelWidth)
+		renderWorkspaceListWithAgents(&screen, workspaces, selected, panelWidth, view.agents)
 	}
 
 	if monitorStatus != "" {
@@ -262,12 +298,17 @@ func renderTitleBar(screen *strings.Builder, workspaces []Workspace, width int) 
 }
 
 func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, selected, width int) {
+	renderWorkspaceListWithAgents(screen, workspaces, selected, width, nil)
+}
+
+func renderWorkspaceListWithAgents(screen *strings.Builder, workspaces []Workspace, selected, width int, agents map[string]string) {
 	const (
 		statusWidth = 8
 		actionWidth = 8
 		gapWidth    = 4
 		minName     = 12
 		minVolume   = 16
+		agentWidth  = 13 // "needs-input 9"
 	)
 
 	showVolume := width >= minName+statusWidth+actionWidth+minVolume+gapWidth*3
@@ -275,8 +316,26 @@ func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, select
 		renderNarrowWorkspaceList(screen, workspaces, selected, width)
 		return
 	}
+	// Only add the AGENT column when it fits beside a usable VOLUME column.
+	showAgents := agents != nil && width >= minName+statusWidth+actionWidth+agentWidth+minVolume+gapWidth*4
+	agentCell := func(name string, colored bool) string { return "" }
+	agentHeader := ""
+	if showAgents {
+		agentHeader = fitCell("AGENT", agentWidth) + strings.Repeat(" ", gapWidth)
+		agentCell = func(name string, colored bool) string {
+			state := agents[name]
+			cell := fitCell(state, agentWidth) + strings.Repeat(" ", gapWidth)
+			if colored && strings.HasPrefix(state, "needs-input") {
+				return "\x1b[1;33m" + cell + "\x1b[0m"
+			}
+			return cell
+		}
+	}
 
 	available := width - statusWidth - actionWidth - gapWidth*3
+	if showAgents {
+		available -= agentWidth + gapWidth
+	}
 	nameWidth := clamp(desiredNameWidth(workspaces), minName, 36)
 	if nameWidth > available-minVolume {
 		nameWidth = available - minVolume
@@ -284,11 +343,12 @@ func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, select
 	volumeWidth := available - nameWidth
 	gap := strings.Repeat(" ", gapWidth)
 
-	fmt.Fprintf(screen, "\x1b[1;30;46m%s%s%s%s%s%s%s\x1b[0m\n",
+	fmt.Fprintf(screen, "\x1b[1;30;46m%s%s%s%s%s%s%s%s\x1b[0m\n",
 		fitCell("WORKSPACE", nameWidth),
 		gap,
 		fitCell("STATUS", statusWidth),
 		gap,
+		agentHeader,
 		fitCell("ACTION", actionWidth),
 		gap,
 		fitCell("VOLUME", volumeWidth),
@@ -299,11 +359,12 @@ func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, select
 		if i == selected && nameWidth >= 3 {
 			name = "> " + name
 		}
-		row := fmt.Sprintf("%s%s%s%s%s%s%s",
+		row := fmt.Sprintf("%s%s%s%s%s%s%s%s",
 			fitCell(name, nameWidth),
 			gap,
 			fitCell(statusText(item.Running), statusWidth),
 			gap,
+			agentCell(item.Name, false),
 			fitCell(actionText(item.Running), actionWidth),
 			gap,
 			fitCell(item.Path, volumeWidth),
@@ -311,11 +372,12 @@ func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, select
 		if i == selected {
 			fmt.Fprintf(screen, "\x1b[1;30;48;5;153m%s\x1b[0m\n", row)
 		} else {
-			fmt.Fprintf(screen, "%s%s%s%s%s%s%s\n",
+			fmt.Fprintf(screen, "%s%s%s%s%s%s%s%s\n",
 				fitCell(name, nameWidth),
 				gap,
 				coloredStatus(item.Running, statusWidth),
 				gap,
+				agentCell(item.Name, true),
 				"\x1b[38;5;110m"+fitCell(actionText(item.Running), actionWidth)+"\x1b[0m",
 				gap,
 				"\x1b[38;5;245m"+fitCell(item.Path, volumeWidth)+"\x1b[0m",
@@ -504,8 +566,8 @@ func renderDeleteConfirmation(out io.Writer, chosen Workspace, width int) {
 		chosen.Name,
 		chosen.Path,
 		"Stops running container and proxy.",
-		"Container files/credentials: LOST.",
-		"Host project and traffic logs: KEPT.",
+		"Container files: LOST.",
+		"Host project, traffic logs, saved logins: KEPT.",
 		"Y: delete; any other key: cancel",
 	} {
 		fmt.Fprintln(out, truncateCell(line, width))

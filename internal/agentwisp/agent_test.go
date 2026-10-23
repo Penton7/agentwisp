@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -65,7 +66,8 @@ func TestAgentLaunchStartsStoppedWorkspace(t *testing.T) {
 	}
 	data, _ := os.ReadFile(calls)
 	text := string(data)
-	if !strings.Contains(text, "start "+name) || !strings.Contains(text, "exec -it --workdir /workspace "+name+" claude --continue") {
+	launch := regexp.MustCompile(`exec -it --workdir /workspace ` + name + ` env AGENTWISP_SESSION=ses_[A-Z0-9]+ claude --settings \{.*\} --continue\n`)
+	if !strings.Contains(text, "start "+name) || !launch.MatchString(text) {
 		t.Fatalf("unexpected launch: %s", text)
 	}
 	if strings.Contains(text, "dangerously") {

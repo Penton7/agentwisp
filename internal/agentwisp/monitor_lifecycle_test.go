@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -172,3 +173,63 @@ func TestHTTPProxyLogsChunkedRequestBytes(t *testing.T) {
 		t.Fatalf("unexpected event %+v", event)
 	}
 }
+
+func TestAllowlistPatterns(t *testing.T) {
+	options, err := parseMonitorOnOptions([]string{"--allow=GitHub.com., *.npmjs.org", "--allow=github.com,192.0.2.7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"github.com", "*.npmjs.org", "192.0.2.7"}
+	if !slices.Equal(options.AllowHosts, want) {
+		t.Fatalf("got %q", options.AllowHosts)
+	}
+	for _, bad := range []string{"--allow=*", "--allow=*.com", "--allow=a..b", "--allow=", "--allow=-x.com", "--allow", "--allow=evil.com/path"} {
+		if _, err := parseMonitorOnOptions([]string{bad}); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+	for host, allowed := range map[string]bool{
+		"github.com:443": true, "GITHUB.COM.": true, "api.github.com:443": false,
+		"registry.npmjs.org": true, "npmjs.org": false, "evilnpmjs.org": false,
+		"192.0.2.7:80": true, "[2001:db8::1]:443": false, "github.com.evil.io": false,
+	} {
+		if got := hostAllowed(host, want); got != allowed {
+			t.Errorf("%s: got %v", host, got)
+		}
+	}
+	if !hostAllowed("anything.example", nil) {
+		t.Fatal("empty allowlist must keep monitor-only behavior")
+	}
+}
+
+func TestProxyDeniesHostsOutsideAllowlist(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "traffic.ndjson")
+	dialed := false
+	proxy := &trafficProxy{workspace: "agentwisp-work-allow", logPath: logPath, allowHosts: []string{"example.com"},
+		transport: roundTripFunc(func(*http.Request) (*http.Response, error) { dialed = true; return nil, io.EOF })}
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "http://other.test/", nil),
+		httptest.NewRequest(http.MethodConnect, "https://other.test:443", nil),
+	} {
+		if request.Method == http.MethodConnect {
+			request.Host = "other.test:443"
+		}
+		recorder := httptest.NewRecorder()
+		if request.Method == http.MethodConnect {
+			proxy.handleConnect(recorder, request)
+		} else {
+			proxy.handleHTTP(recorder, request)
+		}
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s: status %d", request.Method, recorder.Code)
+		}
+	}
+	data, _ := os.ReadFile(logPath)
+	if dialed || strings.Count(string(data), "not in allowlist") != 2 {
+		t.Fatalf("dialed=%v log=%s", dialed, data)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

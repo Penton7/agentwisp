@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -16,14 +17,17 @@ type Monitor interface {
 }
 
 // WorkspaceService owns lifecycle policy shared by CLI and TUI. There is no
-// mutable global runtime. Cross-process serialization is deferred to CORE-04.
+// mutable global runtime. Create/start/stop/remove of one workspace are
+// serialized across processes; interactive sessions run outside the lock.
+// Lock order is lifecycle, then monitor.
 type WorkspaceService struct {
 	runtime Runtime
 	monitor Monitor
+	lock    func(string) (func(), error)
 }
 
 func NewWorkspaceService(runtime Runtime, monitor Monitor) *WorkspaceService {
-	return &WorkspaceService{runtime: runtime, monitor: monitor}
+	return &WorkspaceService{runtime: runtime, monitor: monitor, lock: lockWorkspaceLifecycle}
 }
 func defaultWorkspaceService() *WorkspaceService {
 	runtime := newAppleRuntime()
@@ -47,6 +51,15 @@ func (s *WorkspaceService) Remove(name string, force bool) error {
 	if err := s.require(name); err != nil {
 		return err
 	}
+	unlock, err := s.lock(name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Re-check under the lock: another process may have removed it meanwhile.
+	if err := s.require(name); err != nil {
+		return err
+	}
 	running, err := s.runtime.Running(name)
 	if err != nil {
 		return err
@@ -63,6 +76,11 @@ func (s *WorkspaceService) Stop(name string) error {
 	if err := s.require(name); err != nil {
 		return err
 	}
+	unlock, err := s.lock(name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.runtime.Stop(name); err != nil {
 		return err
 	}
@@ -71,6 +89,17 @@ func (s *WorkspaceService) Stop(name string) error {
 	}
 	return nil
 }
+
+// startLocked starts a stopped workspace while holding the lifecycle lock and
+// releases it before any interactive session begins.
+func (s *WorkspaceService) startLocked(name string, out io.Writer) error {
+	unlock, err := s.lock(name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.ensureStarted(name, out)
+}
 func (s *WorkspaceService) ensureStarted(name string, out io.Writer) error {
 	running, err := s.runtime.Running(name)
 	if err != nil {
@@ -78,7 +107,10 @@ func (s *WorkspaceService) ensureStarted(name string, out io.Writer) error {
 	}
 	if !running {
 		fmt.Fprintf(out, "Starting %s...\n", name)
-		return s.runtime.Start(name)
+		if err := s.runtime.Start(name); err != nil {
+			return err
+		}
+		clearAgentStatuses(name) // No session survives a container restart.
 	}
 	return nil
 }
@@ -93,37 +125,122 @@ func (s *WorkspaceService) launch(req RuntimeLaunch, errOut io.Writer) error {
 	return s.runtime.Launch(prepared, errOut)
 }
 func (s *WorkspaceService) Open(name, cwd string, out, errOut io.Writer) error {
+	if err := s.ensure(name, cwd, out, warnWritableGit); err != nil {
+		return err
+	}
+	return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)
+}
+
+// Ensure creates the workspace for cwd or starts it, without entering it.
+// The existence check and creation happen under one lock, so two concurrent
+// `agw add` runs cannot both try to create the container.
+func (s *WorkspaceService) Ensure(name, cwd string, out io.Writer) error {
+	return s.ensure(name, cwd, out, nil)
+}
+func (s *WorkspaceService) ensure(name, cwd string, out io.Writer, onCreate func(string, io.Writer)) error {
 	if !validWorkspaceName(name) {
 		return fmt.Errorf("invalid workspace name %q", name)
 	}
+	unlock, err := s.lock(name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	exists, err := s.runtime.Exists(name)
 	if err != nil {
 		return err
 	}
-	if !exists {
-		image, err := workspaceImage()
-		if err != nil {
-			return err
-		}
-		if strings.ContainsAny(cwd, ":\r\n") {
-			return fmt.Errorf("workspace path contains unsupported volume delimiter")
-		}
-		fmt.Fprintf(out, "Creating %s...\n", name)
-		if err := s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd}); err != nil {
-			return err
-		}
-		return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)
+	if exists {
+		return s.ensureStarted(name, out)
 	}
-	if err := s.ensureStarted(name, out); err != nil {
+	image, err := workspaceImage()
+	if err != nil {
 		return err
 	}
-	return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)
+	if strings.ContainsAny(cwd, ":\r\n") {
+		return fmt.Errorf("workspace path contains unsupported volume delimiter")
+	}
+	mounts, err := workspaceStateMounts(name)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Creating %s...\n", name)
+	if onCreate != nil {
+		onCreate(cwd, out)
+	}
+	return s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd, Mounts: mounts})
+}
+
+// Container-side status directory written by agent hooks (see status.go).
+const containerStatusDir = "/agentwisp/status"
+
+// workspaceStateMounts prepares per-workspace host directories that outlive
+// the container: agent auth/config (so recreating a workspace or changing its
+// image keeps logins) and the agent status directory. They are separate per
+// workspace, so one compromised workspace cannot read another's tokens. The
+// monitor config and proxy token live beside them and are never mounted.
+func workspaceStateMounts(name string) ([]RuntimeMount, error) {
+	if err := ensureMonitorStateDir(name); err != nil {
+		return nil, err
+	}
+	state := monitorStateDir(name)
+	var mounts []RuntimeMount
+	if os.Getenv("AGENTWISP_PERSIST_AUTH") != "0" {
+		home := os.Getenv("AGENTWISP_AGENT_HOME")
+		if home == "" {
+			home = "/home/node"
+		}
+		if !filepath.IsAbs(home) || strings.ContainsAny(home, ":\r\n") {
+			return nil, fmt.Errorf("AGENTWISP_AGENT_HOME must be an absolute container path")
+		}
+		for _, agent := range []string{"claude", "codex"} {
+			mounts = append(mounts, RuntimeMount{Host: filepath.Join(state, "home", agent), Container: path.Join(home, "."+agent)})
+		}
+	}
+	mounts = append(mounts, RuntimeMount{Host: filepath.Join(state, "status"), Container: containerStatusDir})
+	for _, mount := range mounts {
+		if err := ensurePrivateDir(filepath.Dir(mount.Host)); err != nil {
+			return nil, err
+		}
+		if err := ensurePrivateDir(mount.Host); err != nil {
+			return nil, err
+		}
+	}
+	return mounts, nil
+}
+
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace state must be a real directory: %s", dir)
+	}
+	return os.Chmod(dir, 0o700)
+}
+
+// PurgeState deletes data kept outside the container: saved agent logins and
+// agent status. Traffic logs and monitor configuration are left alone.
+func PurgeState(name string) error {
+	if err := ensureMonitorStateDir(name); err != nil {
+		return err
+	}
+	for _, dir := range []string{"home", "status"} {
+		if err := os.RemoveAll(filepath.Join(monitorStateDir(name), dir)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *WorkspaceService) Enter(name string, out, errOut io.Writer) error {
 	if err := s.require(name); err != nil {
 		return err
 	}
-	if err := s.ensureStarted(name, out); err != nil {
+	if err := s.startLocked(name, out); err != nil {
 		return err
 	}
 	return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)

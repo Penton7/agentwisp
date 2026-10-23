@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -95,7 +96,7 @@ func TestRemovePreservesStateOnProxyShutdownFailure(t *testing.T) {
 		t.Fatal("shutdown error ignored")
 	}
 	got, err := loadMonitorConfig("agentwisp-work-test")
-	if err != nil || got != cfg {
+	if err != nil || !reflect.DeepEqual(got, cfg) {
 		t.Fatalf("state lost: %+v %v", got, err)
 	}
 	data, _ := os.ReadFile(calls)

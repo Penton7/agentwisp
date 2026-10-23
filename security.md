@@ -141,3 +141,23 @@ steps, impact, and suggested mitigation.
 
 Rotate exposed credentials immediately. Never include real secrets in reports,
 tests, logs, screenshots, or example commands.
+
+## Git directories and isolated tasks
+
+A git directory writable by workspace code is untrusted for host git commands:
+`core.fsmonitor`, `core.pager`, aliases, filters, and hooks in it can run
+programs on the host. `agw task` never mounts the main repository's `.git`,
+uses `--no-hardlinks` so the clone shares no object inodes with the main
+repository, and returns results only as a git bundle produced inside the
+container. Host git commands run only in the main repository, with
+`core.hooksPath=/dev/null` and `core.fsmonitor=false`.
+
+## Agent state mounted from the host
+
+Per-workspace host directories hold agent logins (`home/`) and agent status
+(`status/`). They are 0700, separate per workspace, and never contain the
+monitor configuration or proxy token. Status files are written inside the
+container: the host accepts only regular files (no symlinks), at most 64 files
+of 4 KiB, allowlisted states, and uses them for display only. Notification text
+is built from sanitized workspace names and allowlisted states and passed to
+`osascript` as argv.

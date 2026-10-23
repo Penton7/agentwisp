@@ -117,6 +117,9 @@ agentwisp shell    Enter the current directory workspace
 agentwisp stop     Stop the current directory workspace
 agentwisp rm       Remove current workspace after typing its container name
 agentwisp rm --force --yes  Remove even if running, without a prompt
+agentwisp rm --purge        Also delete saved agent logins
+agw task new|list|fetch|rm  Isolated task clones (see below)
+agw watch          Notify when an agent needs input
 agentwisp monitor  Show traffic monitor status for the current workspace
 agentwisp monitor on
 agentwisp monitor off
@@ -240,6 +243,55 @@ requirements and container security guidance are documented in
 A mounted workspace is accessible from inside its container. Do not mount
 sensitive parent directories or use untrusted projects without reviewing them.
 
+**A writable `.git` is a path out of the container.** With `agw add` in a git
+repository, code in the workspace can change `.git/config` (for example
+`core.fsmonitor`) or `.git/hooks`, and the next `git status` you or your IDE
+run on the host executes it. `agw add` warns about this. For agent work, prefer
+isolated tasks.
+
+## Isolated tasks
+
+From the main repository:
+
+```sh
+agw task new fix-login            # clone to ../<repo>-fix-login, branch agw/fix-login
+cd ../api-fix-login && agw agent claude
+cd ../api && agw task fetch fix-login   # bring the committed branch back
+agw task list
+agw task rm fix-login             # refuses while work is not fetched (--force overrides)
+```
+
+`task new` makes an independent clone (`git clone --local --no-hardlinks`, no
+remotes, `--from <ref>` to choose the base) with its own workspace container;
+the main repository's `.git` is never mounted. `task fetch` exports the branch
+inside the container with `git bundle create -` and fetches that bundle file on
+the host, so no git command ever runs on the host inside the agent-controlled
+clone, and the clone's config and hooks are never read. Host git commands run
+with hooks and fsmonitor disabled. A rewritten task history is reported, not
+forced over; only committed work on `agw/<name>` is transferred.
+
+Do not run git on the host inside a task directory or open it in an IDE with
+git integration enabled; treat it as untrusted output.
+
+## Agent logins and status
+
+New workspaces keep agent logins outside the container:
+`~/.agentwisp/workspaces/<workspace>/home/{claude,codex}` is mounted at
+`/home/node/.claude` and `/home/node/.codex`. Logins survive `rm` and
+recreation with another image; `agw rm --purge` deletes them. Each workspace has
+its own directory, so one workspace cannot read another's tokens. Set
+`AGENTWISP_AGENT_HOME` for images whose user home is not `/home/node`, or
+`AGENTWISP_PERSIST_AUTH=0` to keep logins only inside the container.
+
+`agw agent` reports session state through the agents' own hooks (Claude Code
+`--settings` hooks, Codex `notify`); your settings files are not modified. The
+manager shows an AGENT column (`needs-input`, `working`, `idle`) that updates
+automatically, and `agw watch` sends a macOS notification when an agent needs
+input or finishes a turn. Codex reports only turn completion. Status files are
+written from inside the container and are treated as untrusted display data.
+Workspaces created before this feature have no status or login mounts; recreate
+them to enable it.
+
 ## Experimental traffic monitor
 
 AgentWisp can run an opt-in metadata-only HTTP(S) proxy for a workspace:
@@ -269,7 +321,16 @@ agentwisp monitor off
 
 Private LAN destinations are blocked by default to prevent the workspace from
 using the monitor proxy to reach local network devices or services through the
-host laptop. If you explicitly need LAN access through the proxy:
+host laptop. To forward only selected destinations (everything else is denied and logged):
+
+```sh
+agentwisp monitor on --allow=github.com,*.npmjs.org,api.anthropic.com
+```
+
+`*.example.com` matches subdomains, not `example.com` itself. This limits only
+clients that use the proxy; it is not network enforcement.
+
+If you explicitly need LAN access through the proxy:
 
 ```sh
 agentwisp monitor on --allow-private
@@ -347,11 +408,11 @@ go build -o agw ./cmd/agw
 - Apple `container` and macOS are required.
 - Real runtime and filesystem behavior must be verified on macOS with Apple `container`.
 - The default image tag is mutable; use `AGENTWISP_IMAGE` with a reviewed digest for releases.
-- The traffic proxy observes cooperating HTTP clients; it is not an egress firewall.
-- The source bind mount is writable, including `.git` and any project secrets.
+- The traffic proxy observes cooperating HTTP clients; it is not an egress firewall. `--allow` limits only those clients.
+- With `agw add`, the source bind mount is writable, including `.git` and any project secrets; use `agw task` for agent work.
 - TUI paths containing non-ASCII or control characters use escaped notation to preserve terminal safety and alignment.
 - Large workspace lists do not yet have vertical scrolling or search.
-- Monitor lifecycle is serialized per workspace with a file lock; container start/stop/remove are not yet serialized across processes.
+- Create/start/stop/remove and monitor lifecycle are serialized per workspace with file locks; interactive sessions are not.
 
 ## Removing workspaces
 
@@ -464,19 +525,12 @@ The default image contains both tools; build it using [`images/agents/Readme.md`
 Existing workspace images remain unchanged. Authenticate each agent inside its
 container; removal loses container-only auth and session state.
 
-## Multi-workspace interface direction
+## Multiple agents
 
-The recommended direction is a local Web UI backed by a persistent session
-service, while retaining the CLI. The current foundations are described in
-[Workspaces, agent sessions, and attachments](docs/core-models.md) and
-[Workspace service and runtime adapter](docs/runtime-service.md).
-Managed sessions and context exchange between workspaces are not implemented yet.
-
-Open [`design/workspace-console/index.html`](design/workspace-console/index.html)
-in a browser for the interactive split-view concept. It uses sample data only:
-there is no live web API or terminal connection. Try two/four panes, per-pane
-workspace selection, focus, search, the attention queue, and diff/access/events.
-
-Until the session service exists, run `agw agent claude` / `agw agent codex`
-in separate terminal panes, each from the intended project directory. Separate
-panes do not isolate files: use separate project copies for simultaneous writers.
+Run `agw agent claude` / `agw agent codex` in panes of your terminal (tmux,
+Ghostty, iTerm, cmux); use one `agw task` per parallel job so writers never share
+a working copy, and `agw watch` to learn which pane needs you. A local Web UI is
+deferred until that setup proves insufficient; the concept in
+[`design/workspace-console/index.html`](design/workspace-console/index.html) uses
+sample data only. Foundations: [core models](docs/core-models.md) and
+[runtime service](docs/runtime-service.md).
