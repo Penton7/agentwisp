@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -34,13 +35,15 @@ func TestAppleRuntimePreservesArgv(t *testing.T) {
 	r := &appleRuntime{commands: c}
 	command := []string{"claude", "a prompt with spaces; $(touch /tmp/never)", "--model", "example model"}
 	create := RuntimeCreate{Name: "agentwisp-work-test", Image: "custom:local", HostPath: "/project space/$(not-shell)",
-		Mounts: []RuntimeMount{{Host: "/state/home/claude", Container: "/home/node/.claude"}}}
+		Mounts: []RuntimeMount{{Host: "/state/home/claude", Container: "/home/node/.claude"},
+			{Host: "/project space/$(not-shell)/.git", Container: "/workspace/.git", ReadOnly: true}},
+		Protected: []string{".git"}}
 	if err := r.Create(create); err != nil {
 		t.Fatal(err)
 	}
 	// The container's main process must not be the user's shell: exiting the
 	// first shell would otherwise stop the container under other sessions.
-	want := []string{"container", "run", "--detach", "--name", create.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + create.HostPath, "--volume", create.HostPath + ":/workspace", "--volume", "/state/home/claude:/home/node/.claude", "--workdir", "/workspace", create.Image, "sh", "-c", keepAliveScript}
+	want := []string{"container", "run", "--detach", "--name", create.Name, "--label", managedLabel + "=true", "--label", workspaceLabel + "=" + create.HostPath, "--label", layoutLabel + "=" + strconv.Itoa(currentWorkspaceLayout), "--label", readonlyLabel + "=.git", "--volume", create.HostPath + ":/workspace", "--volume", "/state/home/claude:/home/node/.claude", "--mount", "source=/project space/$(not-shell)/.git,target=/workspace/.git,readonly", "--workdir", "/workspace", create.Image, "sh", "-c", keepAliveScript}
 	if !reflect.DeepEqual(c.argv, want) {
 		t.Fatalf("got %q want %q", c.argv, want)
 	}
@@ -63,7 +66,7 @@ func TestAppleRuntimePreservesArgv(t *testing.T) {
 }
 func TestAppleRuntimeRejectsMountDelimiters(t *testing.T) {
 	r := &appleRuntime{commands: &recordingCommands{}}
-	for _, mount := range []RuntimeMount{{Host: "/a:b", Container: "/x"}, {Host: "/a", Container: "relative"}, {Host: "/a", Container: "/x:ro"}} {
+	for _, mount := range []RuntimeMount{{Host: "/a:b", Container: "/x"}, {Host: "/a", Container: "relative"}, {Host: "/a", Container: "/x:ro"}, {Host: "/a,readonly=false", Container: "/x", ReadOnly: true}} {
 		if err := r.Create(RuntimeCreate{Name: "agentwisp-work-test", Image: "i", HostPath: "/p", Mounts: []RuntimeMount{mount}}); err == nil {
 			t.Fatalf("accepted %+v", mount)
 		}

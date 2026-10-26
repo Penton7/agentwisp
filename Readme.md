@@ -118,7 +118,7 @@ agentwisp stop     Stop the current directory workspace
 agentwisp rm       Remove current workspace after typing its container name
 agentwisp rm --force --yes  Remove even if running, without a prompt
 agentwisp rm --purge        Also delete saved agent logins
-agw task new|list|fetch|rm  Isolated task clones (see below)
+agw task new|agent|list|fetch|rm  Isolated task clones (see below)
 agw watch          Notify when an agent needs input
 agentwisp monitor  Show traffic monitor status for the current workspace
 agentwisp monitor on
@@ -137,27 +137,106 @@ list, ls, .       Open the workspace manager
 
 ## Workspace manager
 
-The TUI displays:
+```text
+ agentwisp                       ● 1 need you   ● 1 ready   ● 1 working   ○ 1 stopped
+ ──────────────────────────────────────────────────────────────────────────────────
+   NEEDS YOU  1                                │ api / fix
+ ▌ ● api / fix                     claude 2m   │ task fix of ~/code/api · branch agw/fix
+                                               │
+   READY  1                                    │ AGENTS
+   ● docs                          claude 5m   │ ● claude  needs input  2m
+                                               │
+   WORKING  1                                  │ WORKSPACE
+   ● web                          codex 14m    │ state   ● running
+                                               │ path    ~/code/api-fix
+   STOPPED  1                                  │ files   isolated clone, main .git not mounted
+   ○ legacy                              old   │ protect .idea · read-only for the agent
+                                               │ proxy   on · allowlist 3 host(s) · up
+ ──────────────────────────────────────────────────────────────────────────────────
+ enter shell  c claude  x codex  f fetch  s stop  d delete  n new  ? help  q quit
+```
 
-- workspace/container name;
-- current status;
-- Enter action (`ATTACH` or `START`);
-- host volume path;
-- selected workspace proxy status when the traffic monitor is enabled.
+- The list is grouped by where your attention is needed: **needs you** (an
+  agent waits for an answer), **ready** (an agent finished its turn), **working**,
+  **no agent**, **stopped**. Rows move only when their state changes and stay
+  alphabetical inside a section.
+- Rows are projects, or `repo / task` for `agw task` clones, with the agent and
+  how long it has been in that state. `old` marks containers created by an older
+  AgentWisp (`agw doctor`).
+- On terminals at least 100 columns wide the selected workspace is described in
+  a side pane: agent sessions, path, whether `.git` is exposed, which paths are
+  read-only for the agent, proxy, saved logins and layout. Narrower terminals show a two-line summary under the list.
+  Long lists scroll and keep the selected row's section header in view.
+- The footer shows only the keys that apply to the selected row.
+
+### Creating workspaces
+
+`n` opens a folder browser that starts where `agw` was started (at the
+repository root when started inside one):
+
+```text
+ agentwisp new workspace
+ ──────────────────────────────────────────────────────────────────────────────────
+   NEW WORKSPACE  in ~/code
+     ○ this folder   ~/code
+   ▌ ● api/          git
+     ● api-fix/      git · task clone
+     ○ docs/
+     ● web/          git · has a workspace
+
+   enter  project   the agent edits ~/code/api in place
+                    read-only for it: .git .idea
+                    you keep committing on the host (PyCharm, git)
+   c / x  + agent   same, then start Claude Code / Codex in it
+   t      task      isolated clone on branch agw/<name>; the agent commits, f fetches it back
+ ──────────────────────────────────────────────────────────────────────────────────
+ enter create  t task  c +claude  x +codex  → open  ← up  / go to  esc back
+```
+
+- The first row is the folder itself, the others its subfolders (git
+  repositories marked `●`). `→`/`l` opens a folder, `←`/`h`/backspace goes up.
+- The keys act on the selected row: `enter` creates a project workspace,
+  `c`/`x` also start Claude Code / Codex in it, `t` asks for a task name (typed
+  text is normalized: `Fix Login` becomes `fix-login`) and shows the clone path
+  and branch before creating them.
+- A folder that already has a workspace is marked; `enter` selects it in the
+  list instead of creating another one.
+- `/` (or typing `~`) goes to any path; `tab` completes, `ctrl-u` clears.
+- The home directory, `/`, its ancestors and `~/.agentwisp` can be browsed but
+  not created: they would hand the agent every project and credential. Started
+  in `~`, the browser selects the first subfolder.
+- The browser only reads directories; it never runs git.
+- After creation the new workspace is selected and the message line says what
+  is read-only for the agent.
+
+Colors follow [Catppuccin](https://catppuccin.com): Mocha on dark backgrounds,
+Latte (accents darkened for contrast) on light ones. The background is taken
+from `AGENTWISP_THEME=dark|light`, then `COLORFGBG`, then an OSC 11 query to the
+terminal (at most ~0.3 s), defaulting to dark. Truecolor is used when
+`COLORTERM` is `truecolor`/`24bit`, otherwise the nearest 256-color values.
+`NO_COLOR=1` or `TERM=dumb` disables color; a non-UTF-8 locale or
+`AGENTWISP_ASCII=1` replaces `● ○ ▌ │ ─` with ASCII.
 
 Controls:
 
 ```text
 Up/Down or J/K    Move selection
-Enter             Attach to running or start stopped workspace
+Enter             Open a shell (starts a stopped workspace)
+C / X             Run Claude Code / Codex in the selected workspace
+N                 New workspace: browse folders from here, or type a path; project or task
+F                 Fetch a task branch back into its repository (tasks only)
 S                 Stop selected workspace and its traffic monitor proxy
 D                 Delete selected workspace (Y confirms; any other key cancels)
-R                 Refresh statuses
-Q or Esc          Quit
+R                 Refresh now
+?                 Help
+Q or Esc          Quit (Esc goes back in the new-workspace screen)
 ```
 
-The interface adapts to terminal width and keeps a compact fallback for narrow
-windows.
+When a shell or agent started from the manager exits, the manager reopens on
+the same workspace.
+
+Meaning never depends on color alone: section names, state words and the
+selection marker remain without color.
 
 ## JSON workspace inventory
 
@@ -243,11 +322,33 @@ requirements and container security guidance are documented in
 A mounted workspace is accessible from inside its container. Do not mount
 sensitive parent directories or use untrusted projects without reviewing them.
 
-**A writable `.git` is a path out of the container.** With `agw add` in a git
-repository, code in the workspace can change `.git/config` (for example
-`core.fsmonitor`) or `.git/hooks`, and the next `git status` you or your IDE
-run on the host executes it. `agw add` warns about this. For agent work, prefer
-isolated tasks.
+**Files that host tools execute are mounted read-only.** A writable `.git` is
+a path out of the container: code in the workspace could change `.git/config`
+(for example `core.fsmonitor`) or `.git/hooks`, and the next `git status` you
+or your IDE run on the host would execute it. The same holds for IDE, agent and
+hook-manager configuration. New workspaces (layout 3) therefore mount these
+project paths read-only when they exist at creation:
+
+`.git`, `.idea`, `.vscode`, `.claude`, `.mcp.json`, `.codex`, `.husky`,
+`.githooks`, `.pre-commit-config.yaml`, `.envrc`, and the `core.hooksPath`
+directory when it is inside the project.
+
+agw verifies from inside the new container that they are not writable and
+removes the workspace if the runtime did not honor it. Consequences:
+
+- You keep using git and the IDE on the host (PyCharm, commits, branches) while
+  the agent works. The agent can read history and diffs but cannot commit,
+  stash or switch branches; commit its changes on the host. In the container,
+  Claude Code cannot save "always allow" rules to the project's `.claude/`.
+- A protected path created later (for example `.vscode` the agent makes) is
+  writable; `agw doctor` reports it (`workspace.protected`).
+- Opt out per path at creation: `AGENTWISP_WRITABLE=.git,.claude agw add`.
+- Not covered: the code itself. Makefiles, package scripts, tests and
+  pre-commit hooks that call project scripts run what the agent wrote when you
+  run them on the host; review first. The protection relies on the agent not
+  being root in the container (the default image runs as `node`).
+
+For work where the agent should commit, use isolated tasks.
 
 ## Isolated tasks
 
@@ -255,8 +356,8 @@ From the main repository:
 
 ```sh
 agw task new fix-login            # clone to ../<repo>-fix-login, branch agw/fix-login
-cd ../api-fix-login && agw agent claude
-cd ../api && agw task fetch fix-login   # bring the committed branch back
+agw task agent fix-login          # run Claude there (or: agw task agent fix-login codex)
+agw task fetch fix-login          # bring the committed branch back
 agw task list
 agw task rm fix-login             # refuses while work is not fetched (--force overrides)
 ```
@@ -270,8 +371,34 @@ clone, and the clone's config and hooks are never read. Host git commands run
 with hooks and fsmonitor disabled. A rewritten task history is reported, not
 forced over; only committed work on `agw/<name>` is transferred.
 
-Do not run git on the host inside a task directory or open it in an IDE with
-git integration enabled; treat it as untrusted output.
+The clone's `.git` stays writable (the agent commits there), so do not run git
+on the host inside a task directory, `cd` into it with a git-aware shell prompt,
+or open it in an IDE; treat it as untrusted output. `agw task agent` runs the
+agent without entering the directory. IDE and hook configuration in the clone
+is still mounted read-only.
+
+## Upgrading and checking workspaces
+
+After installing a new version, run:
+
+```sh
+agw doctor          # read-only; --json for scripts, --strict to fail on warnings
+```
+
+It reports containers created with an older layout (and what recreating adds),
+`.git` entries that would make host git run programs, proxies still bound to
+all interfaces, loose state permissions and broken tasks. See
+[docs/doctor.md](docs/doctor.md) for every check.
+
+To recreate an old workspace:
+
+1. If `workspace.git-exec` fails, do not run git in that project until you have
+   removed entries you did not add.
+2. Optionally save Claude history from the old container:
+   `container exec <old-name> tar -C /home/node/.claude -cf - . | tar -C ~/agw-migrate/<project> -xf -`
+3. In the project: `agw rm --force`, then `agw add` (or `agw task new <name>`
+   from the repository). Find the new name with `agw list --json` and move the
+   saved files to `~/.agentwisp/workspaces/<new-name>/home/claude/`.
 
 ## Agent logins and status
 
@@ -409,7 +536,8 @@ go build -o agw ./cmd/agw
 - Real runtime and filesystem behavior must be verified on macOS with Apple `container`.
 - The default image tag is mutable; use `AGENTWISP_IMAGE` with a reviewed digest for releases.
 - The traffic proxy observes cooperating HTTP clients; it is not an egress firewall. `--allow` limits only those clients.
-- With `agw add`, the source bind mount is writable, including `.git` and any project secrets; use `agw task` for agent work.
+- With `agw add`, the project is writable except the protected paths above; project secrets in it are readable by the agent.
+- Read-only protection of single files (`.envrc`, `.mcp.json`, `.pre-commit-config.yaml`) depends on the runtime supporting file mounts; if it does not, agw creates the workspace without them and says so.
 - TUI paths containing non-ASCII or control characters use escaped notation to preserve terminal safety and alignment.
 - Large workspace lists do not yet have vertical scrolling or search.
 - Create/start/stop/remove and monitor lifecycle are serialized per workspace with file locks; interactive sessions are not.

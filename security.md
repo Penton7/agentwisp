@@ -146,7 +146,12 @@ tests, logs, screenshots, or example commands.
 
 A git directory writable by workspace code is untrusted for host git commands:
 `core.fsmonitor`, `core.pager`, aliases, filters, and hooks in it can run
-programs on the host. `agw task` never mounts the main repository's `.git`,
+programs on the host. Project workspaces (layout 3) mount `.git`, IDE, agent
+and hook-manager configuration and an in-project `core.hooksPath` read-only,
+verify that from inside the container, and refuse the workspace otherwise.
+This holds while the container user cannot remount (not root, no
+`CAP_SYS_ADMIN`). Paths created after the workspace are not covered;
+`agw doctor` reports them. `agw task` never mounts the main repository's `.git`,
 uses `--no-hardlinks` so the clone shares no object inodes with the main
 repository, and returns results only as a git bundle produced inside the
 container. Host git commands run only in the main repository, with

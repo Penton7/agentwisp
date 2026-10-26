@@ -21,6 +21,9 @@ type Workspace struct {
 	Name    string // Existing runtime container name, including legacy names.
 	Path    string // Host project path; "-" means unavailable in legacy inventory.
 	Running bool
+	Layout  int // Container layout version label; 0 means created before labels.
+	// Readonly lists protected project paths mounted read-only (layout 3+).
+	Readonly []string
 }
 
 // discoveredWorkspaceID gives inventory a repeatable identity before CORE-05's

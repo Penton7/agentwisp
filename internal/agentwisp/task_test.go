@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -193,5 +194,43 @@ func TestTaskRejectsUnsafeInput(t *testing.T) {
 	}
 	if _, err := loadTask(repo, "missing"); err == nil {
 		t.Fatal("loaded missing task")
+	}
+}
+
+func TestTaskAgentRunsFromTheRepositoryAndKeepsCloneGitWritable(t *testing.T) {
+	s, r, repo := taskFixture(t)
+	r.exists = false
+	var created RuntimeCreate
+	r.create = func(req RuntimeCreate) { created = req; r.exists = true }
+	var out bytes.Buffer
+	if err := s.NewTask(repo, "fix", "HEAD", &out); err != nil {
+		t.Fatal(err)
+	}
+	clone := taskClonePath(repo, "fix")
+	// The agent commits in the clone; agw task fetch reads it as data.
+	for _, mount := range created.Mounts {
+		if mount.ReadOnly && strings.HasSuffix(mount.Host, ".git") {
+			t.Fatalf("task .git mounted read-only: %+v", mount)
+		}
+	}
+	if strings.Contains(out.String(), "&& agw agent") || !strings.Contains(out.String(), "agw task agent fix") {
+		t.Fatalf("hint %q", out.String())
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"agent", "fix"}, "claude"},
+		{[]string{"agent", "fix", "codex", "--", "--model", "m"}, "codex"},
+	} {
+		if err := handleTaskCommand(s, tc.args, repo, nil, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if r.launched.Name != workspaceContainerName(clone) || !slices.Contains(r.launched.Command, tc.want) {
+			t.Fatalf("%v launched %+v", tc.args, r.launched)
+		}
+	}
+	if err := handleTaskCommand(s, []string{"agent", "nope"}, repo, nil, io.Discard, io.Discard); err == nil {
+		t.Fatal("unknown task accepted")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +31,8 @@ func (r *appleRuntime) List() ([]Workspace, error) {
 		}
 	}
 	paths := make(map[string]string, len(names))
+	layouts := make(map[string]int, len(names))
+	readonly := make(map[string][]string, len(names))
 	// Bound argv size while avoiding one process launch per workspace.
 	for offset := 0; offset < len(names); offset += 64 {
 		batch := names[offset:min(offset+64, len(names))]
@@ -37,16 +40,18 @@ func (r *appleRuntime) List() ([]Workspace, error) {
 		if err != nil {
 			return nil, err
 		}
-		parsed, err := workspacePathsFromInspect(output)
+		parsed, err := inspectedWorkspaces(output)
 		if err != nil {
 			return nil, err
 		}
 		for _, name := range batch {
-			path, ok := parsed[name]
+			item, ok := parsed[name]
 			if !ok {
 				return nil, fmt.Errorf("inspect omitted workspace %q", name)
 			}
-			paths[name] = path
+			paths[name] = item.path
+			layouts[name] = item.layout
+			readonly[name] = item.readonly
 		}
 	}
 	workspaces := make([]Workspace, 0, len(names))
@@ -56,10 +61,12 @@ func (r *appleRuntime) List() ([]Workspace, error) {
 			path = "-"
 		}
 		workspaces = append(workspaces, Workspace{
-			ID:      discoveredWorkspaceID(name),
-			Name:    name,
-			Path:    path,
-			Running: running[name],
+			ID:       discoveredWorkspaceID(name),
+			Name:     name,
+			Path:     path,
+			Running:  running[name],
+			Layout:   layouts[name],
+			Readonly: readonly[name],
 		})
 	}
 
@@ -79,11 +86,29 @@ func validWorkspaceName(name string) bool {
 }
 
 func workspacePathsFromInspect(data []byte) (map[string]string, error) {
+	items, err := inspectedWorkspaces(data)
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]string, len(items))
+	for name, item := range items {
+		paths[name] = item.path
+	}
+	return paths, nil
+}
+
+type inspectedWorkspace struct {
+	path     string
+	layout   int
+	readonly []string
+}
+
+func inspectedWorkspaces(data []byte) (map[string]inspectedWorkspace, error) {
 	var records []json.RawMessage
 	if err := json.Unmarshal(data, &records); err != nil {
 		return nil, fmt.Errorf("parse container inspect: %w", err)
 	}
-	paths := make(map[string]string, len(records))
+	paths := make(map[string]inspectedWorkspace, len(records))
 	for _, record := range records {
 		var identity struct {
 			ID            string `json:"id"`
@@ -108,9 +133,39 @@ func workspacePathsFromInspect(data []byte) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		paths[name] = path
+		paths[name] = inspectedWorkspace{path: path, layout: workspaceLayoutFromInspect(record), readonly: workspaceReadonlyFromInspect(record)}
 	}
 	return paths, nil
+}
+
+// workspaceLayoutFromInspect reads the layout label. Containers created before
+// the label existed report 0; doctor treats them as layout 1.
+func workspaceLayoutFromInspect(record []byte) int {
+	var value any
+	if json.Unmarshal(record, &value) != nil {
+		return 0
+	}
+	layout, err := strconv.Atoi(findLabel(value, layoutLabel))
+	if err != nil || layout < 0 {
+		return 0
+	}
+	return layout
+}
+
+// workspaceReadonlyFromInspect reads the protected-paths label, keeping only
+// known names: the label is a record, not an instruction.
+func workspaceReadonlyFromInspect(record []byte) []string {
+	var value any
+	if json.Unmarshal(record, &value) != nil {
+		return nil
+	}
+	var names []string
+	for _, name := range strings.Split(findLabel(value, readonlyLabel), ",") {
+		if isProtectedPath(name) && !contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func (r *appleRuntime) containerIDs(all bool) ([]string, error) {
