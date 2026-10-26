@@ -42,8 +42,8 @@ func hostGit(dir string, args ...string) ([]byte, error) {
 	return bytes.TrimSpace(output), err
 }
 
-func handleTaskCommand(service *WorkspaceService, args []string, cwd string, in io.Reader, out io.Writer) error {
-	usage := fmt.Errorf("usage: agw task new <name> [--from <ref>] | list | fetch <name> | rm <name> [--yes] [--force]")
+func handleTaskCommand(service *WorkspaceService, args []string, cwd string, in io.Reader, out, errOut io.Writer) error {
+	usage := fmt.Errorf("usage: agw task new <name> [--from <ref>] | agent <name> [claude|codex] [-- args...] | list | fetch <name> | rm <name> [--yes] [--force]")
 	if len(args) == 0 {
 		return usage
 	}
@@ -61,6 +61,25 @@ func handleTaskCommand(service *WorkspaceService, args []string, cwd string, in 
 			from = args[3]
 		}
 		return service.NewTask(repo, args[1], from, out)
+	case "agent":
+		// Runs the agent without entering the clone on the host, where a
+		// git-aware prompt would run git in an agent-controlled repository.
+		if len(args) < 2 {
+			return usage
+		}
+		agentArgs := args[2:]
+		if len(agentArgs) == 0 || agentArgs[0] == "--" {
+			agentArgs = append([]string{string(ProviderClaude)}, agentArgs...)
+		}
+		launch, err := agentCommand(agentArgs)
+		if err != nil {
+			return err
+		}
+		task, err := loadTask(repo, args[1])
+		if err != nil {
+			return err
+		}
+		return service.RunAgent(workspaceContainerName(task.Path), launch, out, errOut)
 	case "list", "ls":
 		if len(args) != 1 {
 			return usage
@@ -214,13 +233,13 @@ func (s *WorkspaceService) NewTask(repo, name, from string, out io.Writer) error
 		return err
 	}
 	container := workspaceContainerName(path)
-	if err := s.Ensure(container, path, out); err != nil {
+	if err := s.ensure(container, path, out, true); err != nil {
 		return fmt.Errorf("task clone created at %s, but workspace failed: %w", path, err)
 	}
 	fmt.Fprintf(out, "Task %s: %s (branch %s from %.12s)\n", name, path, task.Branch, task.Base)
-	fmt.Fprintf(out, "Run the agent: cd %s && agw agent claude\n", shellQuote(path))
-	fmt.Fprintf(out, "Bring results back from %s: agw task fetch %s\n", repo, name)
-	fmt.Fprintln(out, "Do not run git on the host inside the task directory; the agent controls its .git.")
+	fmt.Fprintf(out, "Run the agent from %s: agw task agent %s [claude|codex]\n", repo, name)
+	fmt.Fprintf(out, "Bring results back: agw task fetch %s\n", name)
+	fmt.Fprintf(out, "Do not cd into %s with a git-aware shell prompt or open it in an IDE: the agent controls its .git.\n", path)
 	return nil
 }
 
@@ -392,14 +411,4 @@ func (s *WorkspaceService) taskFetched(task taskRecord, container string, out io
 		return strings.TrimSpace(head.String()) == task.Base, nil
 	}
 	return strings.TrimSpace(head.String()) == string(local), nil
-}
-
-// warnWritableGit is shown when a workspace is created over a git checkout.
-func warnWritableGit(path string, out io.Writer) {
-	if _, err := os.Lstat(filepath.Join(path, ".git")); err != nil {
-		return
-	}
-	fmt.Fprintln(out, "Warning: this project's .git is writable inside the workspace. Code in the container")
-	fmt.Fprintln(out, "can make later host git commands run arbitrary programs (config, hooks). For agent work")
-	fmt.Fprintln(out, "prefer `agw task new <name>` from the repository, which never mounts this .git.")
 }

@@ -33,6 +33,7 @@ Keep the tool fast, predictable, and easy to distribute as one binary.
 - `internal/agentwisp/service_test.go` checks lifecycle policy using an injected fake runtime and monitor.
 - `internal/agentwisp/task.go` implements isolated task clones and bundle-based fetch.
 - `internal/agentwisp/status.go` installs agent status hooks, reads untrusted status files, and implements `agw watch`.
+- `internal/agentwisp/doctor.go` implements read-only `agw doctor` checks and the workspace layout history.
 - `internal/agentwisp/terminal.go` owns terminal mode, key parsing, and terminal width detection.
 - `internal/agentwisp/tui.go` renders and runs the workspace manager UI.
 - `internal/agentwisp/main_test.go` contains parser, layout, keyboard, and command help tests.
@@ -63,18 +64,23 @@ discoverable. Containers without labels must remain discoverable through their
 - `agentwisp shell`, `stop`, and `rm` operate on the current directory workspace.
 - New containers run a keep-alive main process; shells and agents are always `exec` sessions.
 - Create/start/stop/remove hold the per-workspace lifecycle lock, never an interactive session. Lock order: lifecycle, then monitor.
+- Changing what new containers get at creation (main process, mounts, labels) requires bumping `currentWorkspaceLayout` and documenting it in `workspaceLayoutHistory` and `docs/doctor.md`; tests enforce this.
+- New doctor checks need a stable ID in `doctorChecks` and a row in `docs/doctor.md`. Doctor stays read-only and never runs git.
 - Never run host git inside a task clone; host git runs only in the main repository with hooks and fsmonitor disabled.
 - `agentwisp help` documents commands, aliases, and TUI controls.
 - `list`, `ls`, and `.` remain manager aliases unless intentionally deprecated.
 - `list --json` and `inspect <id> --json` are read-only; JSON stdout is separate from errors on stderr. Never expose raw inspect or monitor credentials.
-- Enter starts a stopped workspace or attaches to a running one.
+- Enter opens a shell (starting a stopped workspace); `C`/`X` run Claude/Codex; `F` fetches a task. After the session the manager reopens on the same row.
 - `S` stops the selected running workspace and disables its traffic monitor proxy
   without closing the TUI.
 - `R` refreshes container state and preserves selection by name.
 - `D` requests deletion; `Y` confirms and any other key cancels.
 - Deletion keeps host project files and traffic logs, and stops the proxy first.
-- If the traffic monitor is configured for the selected workspace, the TUI shows
-  proxy health, PID, port, private LAN policy, and log path.
+- Rows show human labels (project or `repo / task`) grouped in attention sections (needs you, ready, working, no agent, stopped), alphabetical inside a section; selection is kept by container name.
+- The detail panel describes the selected workspace: task/project, agent sessions, proxy and allowlist, saved logins, layout.
+- At 100+ columns use the list + detail pane layout; narrower terminals get a two-line summary. `? help` and `q quit` always stay in the key bar.
+- Rendering (`tui_view.go`) is pure; file reads and proxy probes happen only in the loop.
+- Colors come only from the roles in `tui_style.go` and the palettes in `tui_theme.go`; `TestPaletteContrast` must pass for both themes. Color only what needs attention, keep meaning visible without color, and honor `NO_COLOR`/`TERM=dumb`.
 
 ## Terminal and TUI invariants
 
@@ -93,9 +99,9 @@ terminal output:
 - Long values must be truncated, never wrapped inside a table row.
 - Handle `SIGWINCH` and recompute the terminal width after resize.
 - Keep a narrow-terminal fallback.
-- Do not introduce Unicode glyphs into width-sensitive columns without adding
-  proper display-cell width handling. Rune count is not sufficient for all
-  Unicode characters.
+- Only the glyphs in `trustedGlyphs` (`tui_style.go`) may be printed as
+  non-ASCII; each is one cell and has an ASCII fallback. Everything else
+  non-ASCII is escaped. Rune count is not sufficient for other Unicode text.
 
 ## Implementation guidelines
 
@@ -147,7 +153,9 @@ For TUI changes, manually verify at least:
 - terminal resize while the TUI is open;
 - running and stopped workspaces;
 - long workspace names and host paths;
-- Enter, `S`, `R`, `Q`, Escape, arrows, and `J/K`;
+- Enter, `C`, `X`, `F`, `S`, `D`, `R`, `?`, `Q`, Escape, arrows, and `J/K`;
+- return to the manager after a shell/agent exits;
+- list scrolling with more workspaces than terminal rows;
 - terminal restoration after normal exit, error, and `Ctrl-C`.
 
 ## Installation during development

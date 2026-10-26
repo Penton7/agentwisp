@@ -111,26 +111,6 @@ func TestAgentStatusIsUntrusted(t *testing.T) {
 	}
 }
 
-func TestTUIAgentColumnKeepsRowWidths(t *testing.T) {
-	workspaces := []Workspace{{Name: "agentwisp-work-a", Path: "/a", Running: true}, {Name: "agentwisp-work-b", Path: "/b"}}
-	var screen strings.Builder
-	renderWorkspaceListWithAgents(&screen, workspaces, 0, 120, map[string]string{"agentwisp-work-a": "needs-input"})
-	lines := strings.Split(strings.TrimRight(screen.String(), "\n"), "\n")
-	if !strings.Contains(lines[0], "AGENT") || !strings.Contains(screen.String(), "needs-input") {
-		t.Fatalf("agent column missing:\n%s", screen.String())
-	}
-	for _, line := range lines {
-		if width := visibleWidth(line); width != 120 {
-			t.Fatalf("row width %d: %q", width, line)
-		}
-	}
-	screen.Reset()
-	renderWorkspaceListWithAgents(&screen, workspaces, 0, 60, map[string]string{"agentwisp-work-a": "working"})
-	if strings.Contains(screen.String(), "AGENT") {
-		t.Fatal("agent column squeezed into a narrow terminal")
-	}
-}
-
 func TestWatchReportsTransitionsOnly(t *testing.T) {
 	t.Setenv("AGENTWISP_STATE_DIR", t.TempDir())
 	s, r, _, _ := testService()

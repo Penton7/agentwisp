@@ -147,29 +147,6 @@ func printMonitorStatus(workspaceName string, out io.Writer) error {
 	return nil
 }
 
-func monitorTUIStatus(workspaces []Workspace, selected int) string {
-	if selected < 0 || selected >= len(workspaces) {
-		return ""
-	}
-	name := workspaces[selected].Name
-	cfg, err := loadMonitorConfig(name)
-	if err != nil || !cfg.Enabled {
-		return "PROXY off"
-	}
-
-	health := "down"
-	if monitorProxyHealthy(cfg) {
-		health = "up"
-	}
-	return fmt.Sprintf("PROXY on  health=%s  pid=%d  port=%d  private=%s  log=%s",
-		health,
-		cfg.PID,
-		cfg.Port,
-		privateLANStatus(cfg),
-		monitorLogPath(name),
-	)
-}
-
 type monitorOnOptions struct {
 	AllowPrivate bool
 	AllowHosts   []string

@@ -163,22 +163,36 @@ func readLimitedNoFollow(path string, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, limit))
 }
 
-// agentSummary is the most urgent state across a workspace's sessions.
-func agentSummary(statuses []agentStatus) string {
-	best := ""
-	count := 0
+// agentInfo summarizes a workspace's sessions for display.
+type agentInfo struct {
+	State    string    // Most urgent state, "" without sessions.
+	Since    time.Time // When the most urgent session entered its state.
+	Waiting  int       // Sessions in needs-input.
+	Sessions []agentStatus
+}
+
+func summarizeAgents(statuses []agentStatus) agentInfo {
+	info := agentInfo{Sessions: statuses}
 	for _, status := range statuses {
-		if agentStates[status.State] > agentStates[best] {
-			best = status.State
+		rank, best := agentStates[status.State], agentStates[info.State]
+		// Among equally urgent sessions, the one waiting longest wins.
+		if rank > best || (rank == best && status.Time.Before(info.Since)) {
+			info.State, info.Since = status.State, status.Time
 		}
 		if status.State == "needs-input" {
-			count++
+			info.Waiting++
 		}
 	}
-	if count > 1 {
-		return best + " " + strconv.Itoa(count)
+	return info
+}
+
+// agentSummary is the most urgent state across a workspace's sessions.
+func agentSummary(statuses []agentStatus) string {
+	info := summarizeAgents(statuses)
+	if info.Waiting > 1 {
+		return info.State + " " + strconv.Itoa(info.Waiting)
 	}
-	return best
+	return info.State
 }
 
 // clearAgentStatuses drops records of sessions that cannot be alive, e.g.
@@ -195,15 +209,16 @@ func clearAgentStatuses(workspace string) {
 	}
 }
 
-// workspaceAgentSummaries returns display states for running workspaces.
-func workspaceAgentSummaries(workspaces []Workspace) map[string]string {
-	summaries := make(map[string]string, len(workspaces))
+// workspaceAgents returns agent summaries for running workspaces; sessions
+// of a stopped container cannot be alive.
+func workspaceAgents(workspaces []Workspace) map[string]agentInfo {
+	agents := make(map[string]agentInfo, len(workspaces))
 	for _, item := range workspaces {
 		if item.Running {
-			summaries[item.Name] = agentSummary(readAgentStatuses(item.Name))
+			agents[item.Name] = summarizeAgents(readAgentStatuses(item.Name))
 		}
 	}
-	return summaries
+	return agents
 }
 
 // Watch prints and optionally notifies about sessions that start waiting for

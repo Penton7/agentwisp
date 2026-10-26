@@ -176,8 +176,8 @@ func TestTUIEscapesUntrustedDataAndKeepsTinyWidths(t *testing.T) {
 
 func TestDeletionPromptExplainsDataLoss(t *testing.T) {
 	var out bytes.Buffer
-	renderDeleteConfirmation(&out, Workspace{Name: "agentwisp-work-test", Path: "/code/test"}, 80)
-	for _, wanted := range []string{"LOST", "KEPT", "Y: delete", "any other key: cancel"} {
+	renderDeleteConfirmation(&out, tuiRow{ws: Workspace{Name: "agentwisp-work-test", Path: "/code/test"}, label: "test"}, 80, plainStyle())
+	for _, wanted := range []string{"lost", "kept", "[y] delete", "any other key: cancel", "agentwisp-work-test"} {
 		if !strings.Contains(out.String(), wanted) {
 			t.Fatalf("missing %q", wanted)
 		}

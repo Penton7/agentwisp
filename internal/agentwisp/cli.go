@@ -39,6 +39,8 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 	case "help", "-h", "--help":
 		printUsage(out)
 		return nil
+	case "doctor":
+		return handleDoctorCommand(service, args[1:], out)
 	case "watch":
 		notify := true
 		for _, arg := range args[1:] {
@@ -142,7 +144,7 @@ func executeWithService(service *WorkspaceService, args []string, in io.Reader, 
 		fmt.Fprintf(out, "Removed %s. Host project files, traffic logs and saved agent logins kept (--purge deletes logins).\n", resolved)
 		return nil
 	case "task":
-		return handleTaskCommand(service, args[1:], cwd, in, out)
+		return handleTaskCommand(service, args[1:], cwd, in, out, errOut)
 	case "monitor":
 		resolved, err := service.Resolve(cwd)
 		if err != nil {
@@ -169,9 +171,11 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  agw agent claude [-- args...]  Run Claude Code in the current workspace")
 	fmt.Fprintln(out, "  agw agent codex [-- args...]   Run Codex in the current workspace")
 	fmt.Fprintln(out, "  agw task new <name> [--from <ref>]  Clone the repo into ../<repo>-<name> with its own workspace")
+	fmt.Fprintln(out, "  agw task agent <name> [claude|codex]  Run an agent in a task without entering its clone")
 	fmt.Fprintln(out, "  agw task list          List tasks of the current repository")
 	fmt.Fprintln(out, "  agw task fetch <name>  Bring branch agw/<name> back as a git bundle")
 	fmt.Fprintln(out, "  agw task rm <name> [--yes] [--force]  Remove task clone and workspace")
+	fmt.Fprintln(out, "  agw doctor [--json] [--strict]  Check workspaces, .git safety and state after upgrades")
 	fmt.Fprintln(out, "  agw watch [--no-notify]  Notify when an agent needs input or finishes a turn")
 	fmt.Fprintln(out, "  agentwisp stop         Stop the current directory workspace")
 	fmt.Fprintln(out, "  agentwisp rm [--force] [--yes] [--purge]  Remove current workspace (prompts by default)")
@@ -192,10 +196,13 @@ func printUsage(out io.Writer) {
 	fmt.Fprintf(out, "  AGENTWISP_IMAGE       Container image for new workspaces (default: %s)\n", defaultWorkspaceImage)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Workspace manager keys:")
-	fmt.Fprintln(out, "  Up/Down or J/K        Move selection")
-	fmt.Fprintln(out, "  Enter                 Attach to running or start stopped workspace")
+	fmt.Fprintln(out, "  Up/Down or J/K        Move selection (rows needing input are on top)")
+	fmt.Fprintln(out, "  Enter                 Open a shell; starts a stopped workspace")
+	fmt.Fprintln(out, "  C / X                 Run Claude Code / Codex in the selected workspace")
+	fmt.Fprintln(out, "  F                     Fetch a task branch back into its repository")
 	fmt.Fprintln(out, "  S                     Stop selected workspace")
 	fmt.Fprintln(out, "  D                     Delete selected workspace with confirmation")
-	fmt.Fprintln(out, "  R                     Refresh workspace statuses")
-	fmt.Fprintln(out, "  Q or Esc              Quit")
+	fmt.Fprintln(out, "  R                     Refresh now (also refreshes automatically)")
+	fmt.Fprintln(out, "  ?                     Help inside the manager")
+	fmt.Fprintln(out, "  Q or Esc              Quit; after a shell or agent exits you return to the manager")
 }

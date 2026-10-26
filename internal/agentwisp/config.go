@@ -26,6 +26,8 @@ const (
 	containerPrefix       = "agentwisp-work-"
 	workspaceLabel        = "dev.agentwisp.workspace"
 	managedLabel          = "dev.agentwisp.managed"
+	layoutLabel           = "dev.agentwisp.layout"
+	readonlyLabel         = "dev.agentwisp.readonly"
 	legacyContainerPrefix = "codex-work-"
 	legacyWorkspaceLabel  = "dev.codexbox.workspace"
 )

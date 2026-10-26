@@ -120,6 +120,10 @@ func TestReadTUIKey(t *testing.T) {
 		{input: "d", want: keyDelete},
 		{input: "Y", want: keyConfirm},
 		{input: "q", want: keyQuit},
+		{input: "c", want: keyClaude},
+		{input: "x", want: keyCodex},
+		{input: "f", want: keyFetch},
+		{input: "?", want: keyHelp},
 	}
 
 	for _, test := range tests {
@@ -141,7 +145,7 @@ func TestRenderTUI(t *testing.T) {
 	}, 1, "", 100)
 
 	text := out.String()
-	for _, expected := range []string{"AGENTWISP", "WORKSPACE", "STATUS", "ACTION", "VOLUME", "agentwisp-work-api", "/code/api", "RUNNING", "STOPPED", "ATTACH", "START", "Open"} {
+	for _, expected := range []string{"agentwisp", "NO AGENT", "STOPPED", "api", "web", "shell", "claude"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("output does not contain %q:\n%s", expected, text)
 		}
@@ -180,116 +184,6 @@ func TestRenderTUIKeepsLastColumnEmpty(t *testing.T) {
 	}
 }
 
-func TestRenderTUIWithMonitorStatus(t *testing.T) {
-	const terminalWidth = 90
-
-	var out bytes.Buffer
-	renderTUIWithMonitorStatus(&out, []Workspace{
-		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
-	}, 0, "", terminalWidth, "PROXY on  health=up  pid=123  port=49152  private=blocked")
-
-	text := out.String()
-	if !strings.Contains(text, "PROXY on") {
-		t.Fatalf("proxy status is missing:\n%s", text)
-	}
-	for _, line := range strings.Split(text, "\n") {
-		if visibleWidth(line) >= terminalWidth {
-			t.Fatalf("line reaches terminal wrap column: width=%d line=%q", visibleWidth(line), line)
-		}
-	}
-}
-
-func TestDesiredNameWidth(t *testing.T) {
-	got := desiredNameWidth([]Workspace{
-		{Name: "short"},
-		{Name: "agentwisp-work-longer-project"},
-	})
-	if got != len("agentwisp-work-longer-project") {
-		t.Fatalf("got %d", got)
-	}
-}
-
-func TestAdaptivePanelWidth(t *testing.T) {
-	workspaces := []Workspace{
-		{Name: "agentwisp-work-api", Path: "/code/api"},
-	}
-
-	if got := adaptivePanelWidth(workspaces, 120); got != 120 {
-		t.Fatalf("panel should fill a wide terminal: got %d", got)
-	}
-	if got := adaptivePanelWidth(workspaces, 40); got != 40 {
-		t.Fatalf("panel should fill a narrow terminal: got %d", got)
-	}
-}
-
-func TestAdaptivePanelGivesVolumeMoreSpace(t *testing.T) {
-	workspaces := []Workspace{
-		{
-			Name: "agentwisp-work-api",
-			Path: "/Users/example/projects/company/platform/services/api",
-		},
-	}
-
-	got := adaptivePanelWidth(workspaces, 160)
-	if got != 160 {
-		t.Fatalf("expected panel to use terminal width, got %d", got)
-	}
-}
-
-func TestRenderTitleBar(t *testing.T) {
-	var out strings.Builder
-	renderTitleBar(&out, []Workspace{
-		{Running: true},
-		{Running: false},
-	}, 60)
-
-	text := out.String()
-	for _, expected := range []string{"AGENTWISP", "2 total", "1 active", "1 stopped"} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("title does not contain %q: %s", expected, text)
-		}
-	}
-}
-
-func TestWorkspaceListRowsHaveEqualWidth(t *testing.T) {
-	var out strings.Builder
-	renderWorkspaceList(&out, []Workspace{
-		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
-		{Name: "agentwisp-work-much-longer-name", Path: "/code/web", Running: false},
-	}, 1, 52)
-
-	lines := strings.Split(out.String(), "\n")
-	want := 52
-	for i, line := range lines[:3] {
-		if got := visibleWidth(line); got != want {
-			t.Fatalf("line %d width: got %d, want %d: %q", i, got, want, line)
-		}
-	}
-}
-
-func TestWorkspaceIndex(t *testing.T) {
-	workspaces := []Workspace{
-		{Name: "agentwisp-work-api"},
-		{Name: "agentwisp-work-web"},
-	}
-
-	if got := workspaceIndex(workspaces, "agentwisp-work-web"); got != 1 {
-		t.Fatalf("got %d, want 1", got)
-	}
-	if got := workspaceIndex(workspaces, "missing"); got != 1 {
-		t.Fatalf("missing workspace fallback: got %d, want 1", got)
-	}
-}
-
-func TestActionText(t *testing.T) {
-	if got := actionText(true); got != "ATTACH" {
-		t.Fatalf("running action: got %q", got)
-	}
-	if got := actionText(false); got != "START" {
-		t.Fatalf("stopped action: got %q", got)
-	}
-}
-
 func TestPrintUsage(t *testing.T) {
 	var out bytes.Buffer
 	printUsage(&out)
@@ -305,18 +199,6 @@ func TestPrintUsage(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help does not contain %q:\n%s", expected, text)
 		}
-	}
-}
-
-func TestNarrowWorkspaceListShowsSelectedVolume(t *testing.T) {
-	var out strings.Builder
-	renderWorkspaceList(&out, []Workspace{
-		{Name: "agentwisp-work-api", Path: "/code/api", Running: true},
-	}, 0, 32)
-
-	text := out.String()
-	if !strings.Contains(text, "VOLUME") || !strings.Contains(text, "/code/api") {
-		t.Fatalf("selected volume is missing:\n%s", text)
 	}
 }
 

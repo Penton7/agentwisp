@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -36,12 +37,16 @@ type RuntimeCreate struct {
 	Name     string
 	Image    string
 	HostPath string
-	Mounts   []RuntimeMount // Additional host directories, e.g. agent auth.
+	Mounts   []RuntimeMount // Additional host paths, e.g. agent auth, protected files.
+	// Protected lists the project-relative paths mounted read-only; it is
+	// recorded as a label so doctor can tell what a workspace protects.
+	Protected []string
 }
 
 type RuntimeMount struct {
 	Host      string
 	Container string
+	ReadOnly  bool // Mounted after the project, over its path inside /workspace.
 }
 
 // RuntimeLaunch is an interactive exec session in an existing container.
@@ -130,12 +135,18 @@ func (r *appleRuntime) Create(req RuntimeCreate) error {
 	}
 	args := []string{"run", "--detach", "--name", req.Name,
 		"--label", managedLabel + "=true", "--label", workspaceLabel + "=" + req.HostPath,
+		"--label", layoutLabel + "=" + strconv.Itoa(currentWorkspaceLayout),
+		"--label", readonlyLabel + "=" + strings.Join(req.Protected, ","),
 		"--volume", req.HostPath + ":/workspace"}
 	for _, mount := range req.Mounts {
-		if strings.ContainsAny(mount.Host+mount.Container, ":\r\n") || !path.IsAbs(mount.Container) {
+		if strings.ContainsAny(mount.Host+mount.Container, ":,\r\n") || !path.IsAbs(mount.Container) {
 			return fmt.Errorf("invalid runtime mount")
 		}
-		args = append(args, "--volume", mount.Host+":"+mount.Container)
+		if mount.ReadOnly {
+			args = append(args, "--mount", "source="+mount.Host+",target="+mount.Container+",readonly")
+		} else {
+			args = append(args, "--volume", mount.Host+":"+mount.Container)
+		}
 	}
 	args = append(args, "--workdir", "/workspace", req.Image, "sh", "-c", keepAliveScript)
 	_, err := r.output(args...)

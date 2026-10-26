@@ -125,7 +125,7 @@ func (s *WorkspaceService) launch(req RuntimeLaunch, errOut io.Writer) error {
 	return s.runtime.Launch(prepared, errOut)
 }
 func (s *WorkspaceService) Open(name, cwd string, out, errOut io.Writer) error {
-	if err := s.ensure(name, cwd, out, warnWritableGit); err != nil {
+	if err := s.ensure(name, cwd, out, false); err != nil {
 		return err
 	}
 	return s.launch(RuntimeLaunch{Name: name, Command: []string{"bash"}}, errOut)
@@ -135,9 +135,12 @@ func (s *WorkspaceService) Open(name, cwd string, out, errOut io.Writer) error {
 // The existence check and creation happen under one lock, so two concurrent
 // `agw add` runs cannot both try to create the container.
 func (s *WorkspaceService) Ensure(name, cwd string, out io.Writer) error {
-	return s.ensure(name, cwd, out, nil)
+	return s.ensure(name, cwd, out, false)
 }
-func (s *WorkspaceService) ensure(name, cwd string, out io.Writer, onCreate func(string, io.Writer)) error {
+
+// ensure creates or starts a workspace. A task clone (task) keeps its .git
+// writable; every other protected path is mounted read-only in both cases.
+func (s *WorkspaceService) ensure(name, cwd string, out io.Writer, task bool) error {
 	if !validWorkspaceName(name) {
 		return fmt.Errorf("invalid workspace name %q", name)
 	}
@@ -164,11 +167,33 @@ func (s *WorkspaceService) ensure(name, cwd string, out io.Writer, onCreate func
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Creating %s...\n", name)
-	if onCreate != nil {
-		onCreate(cwd, out)
+	protectMounts, protected, notes, err := workspaceProtection(cwd, task, os.Getenv)
+	if err != nil {
+		return err
 	}
-	return s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd, Mounts: mounts})
+	fmt.Fprintf(out, "Creating %s...\n", name)
+	err = s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd,
+		Mounts: append(mounts, protectMounts...), Protected: protected})
+	if err != nil {
+		// Some runtimes share directories only. Retry without single-file
+		// mounts rather than refuse the workspace, and say what is unprotected.
+		dirMounts, dirNames, files := splitFileMounts(protectMounts, protected)
+		if len(files) == 0 {
+			return err
+		}
+		_ = s.runtime.Remove(name, true) // In case the failed run left a container.
+		protectMounts, protected = dirMounts, dirNames
+		notes = append(notes, fmt.Sprintf("the runtime cannot mount single files read-only (%v); writable: %s", err, strings.Join(files, ", ")))
+		if err := s.runtime.Create(RuntimeCreate{Name: name, Image: image, HostPath: cwd,
+			Mounts: append(mounts, protectMounts...), Protected: protected}); err != nil {
+			return err
+		}
+	}
+	if err := s.verifyProtection(name, protected); err != nil {
+		return err
+	}
+	printProtection(cwd, task, protected, notes, out)
+	return nil
 }
 
 // Container-side status directory written by agent hooks (see status.go).
@@ -290,16 +315,4 @@ func (s *WorkspaceService) Resolve(cwd string) (string, error) {
 		return match, nil
 	}
 	return preferred, nil
-}
-
-func workspaceIndex(workspaces []Workspace, name string) int {
-	for i, item := range workspaces {
-		if item.Name == name {
-			return i
-		}
-	}
-	if len(workspaces) == 0 {
-		return 0
-	}
-	return len(workspaces) - 1
 }

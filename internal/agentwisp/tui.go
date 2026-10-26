@@ -2,76 +2,142 @@ package agentwisp
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 )
 
+// managerState survives between manager screens: after a shell or agent
+// started from the manager exits, the manager reopens on the same row.
+type managerState struct {
+	selectedName string
+	message      string
+	messageRole  tuiRole
+}
+
 func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Writer) error {
 	if in != os.Stdin || out != os.Stdout {
 		return chooseWorkspaceByNumber(service, in, out, errOut)
 	}
+	state := managerState{}
+	cwd, _ := os.Getwd()
+	for {
+		action, err := runManager(service, in, out, &state, cwd)
+		if errors.Is(err, errNoTerminal) {
+			return chooseWorkspaceByNumber(service, in, out, errOut)
+		}
+		if err != nil || action == nil {
+			return err
+		}
+		// The terminal is restored before the session runs.
+		state.message = ""
+		if err := action(); err != nil {
+			state.message, state.messageRole = "Session ended with an error: "+err.Error(), roleError
+		}
+	}
+}
 
+var errNoTerminal = errors.New("no interactive terminal")
+
+// cachedManagerStyle keeps one theme per process: the manager reopens after
+// every session, and the terminal background does not change meanwhile.
+var cachedManagerStyle *tuiStyle
+
+// taskIndex maps task clone paths to their records for labels and actions.
+func taskIndex() map[string]taskRecord {
+	return loadAllTasks(&doctorReport{})
+}
+
+// runManager shows the manager until the user quits (nil action) or picks a
+// session to run (returned action runs after the terminal is restored).
+func runManager(service *WorkspaceService, in io.Reader, out io.Writer, state *managerState, cwd string) (func() error, error) {
 	term, err := enterRawTerminal()
 	if err != nil {
-		return chooseWorkspaceByNumber(service, in, out, errOut)
+		return nil, errNoTerminal
 	}
 	defer term.restore()
-
 	fmt.Fprint(out, "\x1b[?1049h\x1b[?25l")
-	screenOpen := true
-	defer func() {
-		if screenOpen {
-			fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
-		}
-	}()
+	defer fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
 
 	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM, syscall.SIGWINCH)
 	defer signal.Stop(interrupts)
 
-	reader := bufio.NewReader(in)
 	workspaces, err := service.List()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	tasks := taskIndex()
+	agents := workspaceAgents(workspaces)
+	if cachedManagerStyle == nil {
+		// Probe the background before alternate screen and key reader start.
+		style := managerStyle(probeTerminalBackground)
+		cachedManagerStyle = &style
+	}
+	view := tuiView{message: state.message, messageRole: state.messageRole, now: time.Now(), style: *cachedManagerStyle}
+	view.height, view.width = terminalSize()
+	rebuild := func() {
+		name := state.selectedName
+		view.rows = buildTUIRows(workspaces, agents, tasks)
+		view.selected = rowIndex(view.rows, name)
+		if len(view.rows) > 0 {
+			state.selectedName = view.rows[view.selected].ws.Name
+		}
+	}
+	refreshDetails := func() {
+		view.detail = nil
+		if len(view.rows) > 0 {
+			view.detail = tuiDetails(view.rows[view.selected], time.Now())
+		}
+	}
+	rebuild()
+	refreshDetails()
 
-	selected := 0
-	message := ""
-	width := terminalWidth()
-	keyCh := make(chan tuiKey, 1)
+	reader := bufio.NewReader(in)
+	keyCh := make(chan keyEvent, 1)
 	errCh := make(chan error, 1)
 	readingKey := false
-	var pendingDelete *Workspace
-	// Agent states change without key presses; poll the small status files.
 	ticker := time.NewTicker(agentStatusPoll)
 	defer ticker.Stop()
-	agents := workspaceAgentSummaries(workspaces)
-	sticky := ""
+	ticks := 0
+	var pendingDelete *tuiRow
+	last := ""
+	draw := func() {
+		var frame strings.Builder
+		if pendingDelete != nil {
+			var buf bytes.Buffer
+			renderDeleteConfirmation(&buf, *pendingDelete, view.width, view.style)
+			frame.WriteString(buf.String())
+		} else {
+			view.now = time.Now()
+			view.offset = scrollOffset(view)
+			renderTUIView(&frame, view)
+		}
+		// Redraw only when the frame changed: avoids flicker on periodic polls.
+		if frame.String() != last {
+			last = frame.String()
+			fmt.Fprint(out, last)
+		}
+	}
+	setMessage := func(message string, role tuiRole) {
+		view.message, view.messageRole = message, role
+		state.message, state.messageRole = message, role
+	}
 
 	for {
-		if pendingDelete != nil {
-			renderDeleteConfirmation(out, *pendingDelete, width)
-		} else {
-			if message != "" {
-				sticky = message
-			}
-			renderTUIView(out, tuiView{workspaces: workspaces, selected: selected, message: sticky, width: width,
-				monitorStatus: monitorTUIStatus(workspaces, selected), agents: agents})
-		}
-		message = ""
-
+		draw()
 		if !readingKey {
 			readingKey = true
 			go func() {
-				key, readErr := readTUIKey(reader)
+				key, readErr := readKeyEvent(reader)
 				if readErr != nil {
 					errCh <- readErr
 					return
@@ -82,107 +148,273 @@ func chooseWorkspace(service *WorkspaceService, in io.Reader, out, errOut io.Wri
 
 		select {
 		case <-ticker.C:
-			if updated := workspaceAgentSummaries(workspaces); !maps.Equal(updated, agents) {
-				agents = updated
-			} else {
-				// Avoid redrawing (and re-probing proxy health) when nothing changed.
-				continue
+			ticks++
+			// Agent states every tick; container states and details less often.
+			if ticks%5 == 0 {
+				if refreshed, err := service.List(); err == nil {
+					workspaces = refreshed
+					tasks = taskIndex()
+				}
 			}
+			agents = workspaceAgents(workspaces)
+			rebuild()
+			if ticks%5 == 0 {
+				refreshDetails()
+			}
+			continue
 		case received := <-interrupts:
 			if received == syscall.SIGWINCH {
-				width = terminalWidth()
+				view.height, view.width = terminalSize()
+				last = ""
 				continue
 			}
-			return nil
+			return nil, nil
 		case readErr := <-errCh:
 			readingKey = false
 			if errors.Is(readErr, io.EOF) {
-				return nil
+				return nil, nil
 			}
-			return readErr
-		case key := <-keyCh:
+			return nil, readErr
+		case event := <-keyCh:
 			readingKey = false
-			sticky = ""
+			if view.create != nil {
+				action := view.create.handle(event)
+				switch action.kind {
+				case createBack:
+					view.create = nil
+					setMessage("", roleText)
+				case createSelect:
+					view.create = nil
+					for _, item := range workspaces {
+						if filepath.IsAbs(item.Path) && canonicalPath(item.Path) == action.path {
+							state.selectedName = item.Name
+						}
+					}
+					rebuild()
+					refreshDetails()
+					setMessage(homeRelative(action.path)+" already has a workspace; selected it", roleDim)
+				case createProject, createTask:
+					run, err := createFromManager(service, action, &view, &workspaces, &tasks, state, draw, setMessage)
+					agents = workspaceAgents(workspaces)
+					rebuild()
+					refreshDetails()
+					if err == nil && run != nil {
+						return run, nil
+					}
+				}
+				continue
+			}
+			key := event.key
+			if key == keyEscape {
+				key = keyQuit
+			}
+			if view.help {
+				view.help = false
+				continue
+			}
 			if pendingDelete != nil {
 				chosen := *pendingDelete
 				pendingDelete = nil
 				if key != keyConfirm {
-					message = "Removal cancelled"
+					setMessage("Removal cancelled", roleDim)
 					continue
 				}
-				if err := service.Remove(chosen.Name, true); err != nil {
-					message = "Removal failed: " + err.Error()
+				if err := service.Remove(chosen.ws.Name, true); err != nil {
+					setMessage("Removal failed: "+err.Error(), roleError)
 					continue
 				}
-				// Remove locally first so refresh failure cannot leave a deleted row selected.
-				workspaces = append(workspaces[:selected], workspaces[selected+1:]...)
-				selected = min(selected, max(0, len(workspaces)-1))
-				message = "Removed " + chosen.Name + "; host files and logs kept"
+				removed := "Removed " + chosen.label + "; host files, logs and saved logins kept"
+				if chosen.task != nil {
+					removed += "; clone kept (agw task rm " + chosen.task.Name + ")"
+				}
+				setMessage(removed, roleOK)
+				if refreshed, err := service.List(); err == nil {
+					workspaces = refreshed
+				} else {
+					workspaces = withoutWorkspace(workspaces, chosen.ws.Name)
+				}
+				agents = workspaceAgents(workspaces)
+				rebuild()
+				refreshDetails()
 				continue
 			}
-			if len(workspaces) == 0 && key != keyRefresh && key != keyQuit {
-				continue
-			}
+			setMessage("", roleText)
 			switch key {
-			case keyUp:
-				selected--
-				if selected < 0 {
-					selected = len(workspaces) - 1
-				}
-			case keyDown:
-				selected++
-				if selected >= len(workspaces) {
-					selected = 0
-				}
-			case keyDelete:
-				chosen := workspaces[selected]
-				pendingDelete = &chosen
-			case keyRefresh:
-				selectedName := ""
-				if len(workspaces) > 0 {
-					selectedName = workspaces[selected].Name
-				}
-				refreshed, refreshErr := service.List()
-				if refreshErr != nil {
-					message = "Refresh failed: " + refreshErr.Error()
-					continue
-				}
-				workspaces = refreshed
-				agents = workspaceAgentSummaries(workspaces)
-				selected = workspaceIndex(workspaces, selectedName)
-				message = "Statuses refreshed"
-			case keyStop:
-				chosen := workspaces[selected]
-				if !chosen.Running {
-					message = chosen.Name + " is already stopped"
-					continue
-				}
-
-				renderTUIWithMonitorStatus(out, workspaces, selected, "Stopping "+chosen.Name+"...", width, monitorTUIStatus(workspaces, selected))
-				stopErr := service.Stop(chosen.Name)
-				message = chosen.Name + " stopped; proxy stopped"
-				if stopErr != nil {
-					message = "Stop failed: " + stopErr.Error()
-				}
-
-				refreshed, refreshErr := service.List()
-				if refreshErr != nil {
-					message += "; refresh failed: " + refreshErr.Error()
-					continue
-				}
-				workspaces = refreshed
-				selected = workspaceIndex(workspaces, chosen.Name)
-			case keyEnter:
-				chosen := workspaces[selected]
-				term.restore()
-				fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
-				screenOpen = false
-				return service.Enter(chosen.Name, out, errOut)
 			case keyQuit:
-				return nil
+				return nil, nil
+			case keyHelp:
+				view.help = true
+				continue
+			case keyNew:
+				view.create = newCreateState(cwd, workspaces, tasks)
+				continue
+			case keyRefresh:
+				refreshed, err := service.List()
+				if err != nil {
+					setMessage("Refresh failed: "+err.Error(), roleError)
+					continue
+				}
+				workspaces, tasks = refreshed, taskIndex()
+				agents = workspaceAgents(workspaces)
+				rebuild()
+				refreshDetails()
+				setMessage("Refreshed", roleDim)
+				continue
+			}
+			if len(view.rows) == 0 {
+				continue
+			}
+			row := view.rows[view.selected]
+			switch key {
+			case keyUp, keyDown:
+				step := 1
+				if key == keyUp {
+					step = len(view.rows) - 1
+				}
+				view.selected = (view.selected + step) % len(view.rows)
+				state.selectedName = view.rows[view.selected].ws.Name
+				refreshDetails()
+			case keyDelete:
+				pendingDelete = &row
+			case keyStop:
+				if !row.ws.Running {
+					setMessage(row.label+" is already stopped", roleWarn)
+					continue
+				}
+				setMessage("Stopping "+row.label+"...", roleAccent)
+				draw()
+				if err := service.Stop(row.ws.Name); err != nil {
+					setMessage("Stop failed: "+err.Error(), roleError)
+				} else {
+					setMessage(row.label+" stopped; proxy stopped", roleOK)
+				}
+				if refreshed, err := service.List(); err == nil {
+					workspaces = refreshed
+				}
+				agents = workspaceAgents(workspaces)
+				rebuild()
+				refreshDetails()
+			case keyFetch:
+				if row.task == nil {
+					setMessage("f works for agw task workspaces; "+row.label+" is a project", roleWarn)
+					continue
+				}
+				setMessage("Fetching "+row.task.Branch+"...", roleAccent)
+				draw()
+				var output bytes.Buffer
+				if err := service.FetchTask(row.task.Repo, row.task.Name, &output); err != nil {
+					setMessage("Fetch failed: "+err.Error(), roleError)
+				} else {
+					setMessage(lastLine(output.String()), roleOK)
+				}
+				refreshDetails()
+			case keyEnter, keyClaude, keyCodex:
+				name, label := row.ws.Name, row.label
+				state.selectedName = name
+				var command []string
+				switch key {
+				case keyClaude:
+					command = []string{"claude"}
+				case keyCodex:
+					command = []string{"codex"}
+				}
+				return func() error {
+					what := "shell"
+					if command != nil {
+						what = command[0]
+					}
+					fmt.Fprintf(out, "agw: %s in %s; exit it to return to the manager.\n", what, terminalText(label))
+					if command == nil {
+						return service.Enter(name, out, os.Stderr)
+					}
+					return service.RunAgent(name, command, out, os.Stderr)
+				}, nil
 			}
 		}
 	}
+}
+
+// createFromManager creates a project workspace or a task while the manager
+// stays on screen. On success the new workspace is selected; with an agent
+// requested, the returned action starts it after the terminal is restored.
+func createFromManager(service *WorkspaceService, action createAction, view *tuiView, workspaces *[]Workspace,
+	tasks *map[string]taskRecord, state *managerState, draw func(), setMessage func(string, tuiRole)) (func() error, error) {
+	var output bytes.Buffer
+	var name, label string
+	var err error
+	switch action.kind {
+	case createTask:
+		label = filepath.Base(action.path) + " / " + action.name
+		setMessage("Cloning "+homeRelative(action.path)+" and creating "+label+"...", roleAccent)
+		draw()
+		err = service.NewTask(action.path, action.name, "HEAD", &output)
+		name = workspaceContainerName(taskClonePath(action.path, action.name))
+	default:
+		label = filepath.Base(action.path)
+		name = workspaceContainerName(action.path)
+		for _, item := range *workspaces {
+			if item.Name == name {
+				view.create = nil
+				state.selectedName = name
+				setMessage(label+" already has a workspace; selected it", roleDim)
+				return nil, nil
+			}
+		}
+		setMessage("Creating "+label+" (first time may pull the image)...", roleAccent)
+		draw()
+		err = service.Ensure(name, action.path, &output)
+	}
+	if err != nil {
+		view.create.problem = "Create failed: " + strings.TrimSpace(err.Error())
+		setMessage("", roleText)
+		return nil, err
+	}
+	view.create = nil
+	if refreshed, listErr := service.List(); listErr == nil {
+		*workspaces = refreshed
+	}
+	*tasks = taskIndex()
+	state.selectedName = name
+	protected, warn := protectionSummary(output.String())
+	message := "Created " + label
+	if protected != "" {
+		message += " · read-only for the agent: " + protected
+	}
+	role := roleOK
+	if warn {
+		role = roleWarn
+		message += " · see agw doctor"
+	}
+	if action.agent == "" {
+		if action.kind == createTask {
+			message += " · c claude, x codex, f fetch"
+		} else {
+			message += " · c claude, x codex, enter shell"
+		}
+		setMessage(message, role)
+		return nil, nil
+	}
+	setMessage(message, role)
+	agent := action.agent
+	return func() error {
+		fmt.Fprintf(os.Stdout, "agw: %s in %s; exit it to return to the manager.\n", agent, terminalText(label))
+		return service.RunAgent(name, []string{agent}, os.Stdout, os.Stderr)
+	}, nil
+}
+
+func withoutWorkspace(workspaces []Workspace, name string) []Workspace {
+	kept := make([]Workspace, 0, len(workspaces))
+	for _, item := range workspaces {
+		if item.Name != name {
+			kept = append(kept, item)
+		}
+	}
+	return kept
+}
+
+func lastLine(text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	return lines[len(lines)-1]
 }
 
 func chooseWorkspaceByNumber(service *WorkspaceService, in io.Reader, out, errOut io.Writer) error {
@@ -200,310 +432,16 @@ func chooseWorkspaceByNumber(service *WorkspaceService, in io.Reader, out, errOu
 	return nil
 }
 
+// renderTUI renders a frame without agent, task or proxy details. Tests and
+// non-loop callers use it; the manager loop builds a full tuiView.
 func renderTUI(out io.Writer, workspaces []Workspace, selected int, message string, width int) {
-	renderTUIWithMonitorStatus(out, workspaces, selected, message, width, "")
-}
-
-func renderTUIWithMonitorStatus(out io.Writer, workspaces []Workspace, selected int, message string, width int, monitorStatus string) {
-	renderTUIView(out, tuiView{workspaces: workspaces, selected: selected, message: message, width: width, monitorStatus: monitorStatus})
-}
-
-// tuiView is one frame. agents maps container name to the most urgent agent
-// state; nil hides the AGENT column.
-type tuiView struct {
-	workspaces    []Workspace
-	selected      int
-	message       string
-	width         int
-	monitorStatus string
-	agents        map[string]string
-}
-
-func renderTUIView(out io.Writer, view tuiView) {
-	workspaces, selected, message, width, monitorStatus := view.workspaces, view.selected, view.message, view.width, view.monitorStatus
-	if width < 2 {
-		width = 2
-	}
-	// Keep the last terminal column empty. Writing into it can trigger an
-	// automatic wrap before the following newline in many terminal emulators.
-	contentWidth := width - 1
-	panelWidth := adaptivePanelWidth(workspaces, contentWidth)
-
-	var screen strings.Builder
-	screen.Grow(panelWidth * (len(workspaces) + 8))
-	screen.WriteString("\x1b[H\x1b[2J")
-	renderTitleBar(&screen, workspaces, panelWidth)
-
-	if len(workspaces) == 0 {
-		screen.WriteString(truncateCell("No workspaces. R refresh, Q quit.", panelWidth))
-		screen.WriteString("\n")
-	} else {
-		renderWorkspaceListWithAgents(&screen, workspaces, selected, panelWidth, view.agents)
-	}
-
-	if monitorStatus != "" {
-		screen.WriteString("\n\x1b[38;5;250m")
-		screen.WriteString(truncateCell(monitorStatus, panelWidth))
-		screen.WriteString("\x1b[0m")
-	}
-	if message != "" {
-		screen.WriteString("\n\x1b[33m")
-		screen.WriteString(truncateCell(message, panelWidth))
-		screen.WriteString("\x1b[0m")
-	}
-	screen.WriteString("\n")
-	renderKeyBar(&screen, panelWidth)
-	fmt.Fprint(out, screen.String())
-}
-
-func adaptivePanelWidth(workspaces []Workspace, terminalWidth int) int {
-	// The workspace manager is a full-screen TUI. Use all available columns
-	// instead of sizing the panel only to its current content; the VOLUME
-	// column receives the extra room on wide terminals.
-	if terminalWidth < 1 {
-		return 1
-	}
-	return terminalWidth
-}
-
-func renderTitleBar(screen *strings.Builder, workspaces []Workspace, width int) {
-	running := 0
-	for _, item := range workspaces {
-		if item.Running {
-			running++
-		}
-	}
-	stopped := len(workspaces) - running
-
-	title := " AGENTWISP  WORKSPACES"
-	summary := fmt.Sprintf("%d total  %d active  %d stopped ", len(workspaces), running, stopped)
-	space := width - len([]rune(title)) - len([]rune(summary))
-	if space < 1 {
-		summary = fmt.Sprintf("%d/%d ", running, len(workspaces))
-		space = width - len([]rune(title)) - len([]rune(summary))
-	}
-	if space < 0 {
-		space = 0
-	}
-
-	screen.WriteString("\x1b[1;37;44m")
-	screen.WriteString(truncateCell(title+strings.Repeat(" ", space)+summary, width))
-	screen.WriteString("\x1b[0m\n")
-	screen.WriteString("\x1b[38;5;244m")
-	screen.WriteString(truncateCell(" Choose a workspace to start or attach", width))
-	screen.WriteString("\x1b[0m\n")
-	screen.WriteString("\x1b[38;5;240m")
-	screen.WriteString(strings.Repeat("─", width))
-	screen.WriteString("\x1b[0m\n")
-}
-
-func renderWorkspaceList(screen *strings.Builder, workspaces []Workspace, selected, width int) {
-	renderWorkspaceListWithAgents(screen, workspaces, selected, width, nil)
-}
-
-func renderWorkspaceListWithAgents(screen *strings.Builder, workspaces []Workspace, selected, width int, agents map[string]string) {
-	const (
-		statusWidth = 8
-		actionWidth = 8
-		gapWidth    = 4
-		minName     = 12
-		minVolume   = 16
-		agentWidth  = 13 // "needs-input 9"
-	)
-
-	showVolume := width >= minName+statusWidth+actionWidth+minVolume+gapWidth*3
-	if !showVolume {
-		renderNarrowWorkspaceList(screen, workspaces, selected, width)
-		return
-	}
-	// Only add the AGENT column when it fits beside a usable VOLUME column.
-	showAgents := agents != nil && width >= minName+statusWidth+actionWidth+agentWidth+minVolume+gapWidth*4
-	agentCell := func(name string, colored bool) string { return "" }
-	agentHeader := ""
-	if showAgents {
-		agentHeader = fitCell("AGENT", agentWidth) + strings.Repeat(" ", gapWidth)
-		agentCell = func(name string, colored bool) string {
-			state := agents[name]
-			cell := fitCell(state, agentWidth) + strings.Repeat(" ", gapWidth)
-			if colored && strings.HasPrefix(state, "needs-input") {
-				return "\x1b[1;33m" + cell + "\x1b[0m"
-			}
-			return cell
-		}
-	}
-
-	available := width - statusWidth - actionWidth - gapWidth*3
-	if showAgents {
-		available -= agentWidth + gapWidth
-	}
-	nameWidth := clamp(desiredNameWidth(workspaces), minName, 36)
-	if nameWidth > available-minVolume {
-		nameWidth = available - minVolume
-	}
-	volumeWidth := available - nameWidth
-	gap := strings.Repeat(" ", gapWidth)
-
-	fmt.Fprintf(screen, "\x1b[1;30;46m%s%s%s%s%s%s%s%s\x1b[0m\n",
-		fitCell("WORKSPACE", nameWidth),
-		gap,
-		fitCell("STATUS", statusWidth),
-		gap,
-		agentHeader,
-		fitCell("ACTION", actionWidth),
-		gap,
-		fitCell("VOLUME", volumeWidth),
-	)
-
-	for i, item := range workspaces {
-		name := item.Name
-		if i == selected && nameWidth >= 3 {
-			name = "> " + name
-		}
-		row := fmt.Sprintf("%s%s%s%s%s%s%s%s",
-			fitCell(name, nameWidth),
-			gap,
-			fitCell(statusText(item.Running), statusWidth),
-			gap,
-			agentCell(item.Name, false),
-			fitCell(actionText(item.Running), actionWidth),
-			gap,
-			fitCell(item.Path, volumeWidth),
-		)
-		if i == selected {
-			fmt.Fprintf(screen, "\x1b[1;30;48;5;153m%s\x1b[0m\n", row)
-		} else {
-			fmt.Fprintf(screen, "%s%s%s%s%s%s%s%s\n",
-				fitCell(name, nameWidth),
-				gap,
-				coloredStatus(item.Running, statusWidth),
-				gap,
-				agentCell(item.Name, true),
-				"\x1b[38;5;110m"+fitCell(actionText(item.Running), actionWidth)+"\x1b[0m",
-				gap,
-				"\x1b[38;5;245m"+fitCell(item.Path, volumeWidth)+"\x1b[0m",
-			)
-		}
-	}
-}
-
-func renderNarrowWorkspaceList(screen *strings.Builder, workspaces []Workspace, selected, width int) {
-	const (
-		statusWidth = 8
-		gapWidth    = 4
-	)
-	if width < statusWidth+gapWidth+1 {
-		for i, item := range workspaces {
-			prefix := "  "
-			if i == selected {
-				prefix = "> "
-			}
-			screen.WriteString(truncateCell(prefix+item.Name, width) + "\n")
-		}
-		return
-	}
-	nameWidth := width - statusWidth - gapWidth
-	gap := strings.Repeat(" ", gapWidth)
-
-	fmt.Fprintf(screen, "\x1b[1;30;46m%s%s%s\x1b[0m\n",
-		fitCell("WORKSPACE", nameWidth),
-		gap,
-		fitCell("STATUS", statusWidth),
-	)
-	for i, item := range workspaces {
-		name := item.Name
-		if i == selected && nameWidth >= 3 {
-			name = "> " + name
-		}
-		row := fmt.Sprintf("%s%s%s",
-			fitCell(name, nameWidth),
-			gap,
-			fitCell(statusText(item.Running), statusWidth),
-		)
-		if i == selected {
-			fmt.Fprintf(screen, "\x1b[1;30;48;5;153m%s\x1b[0m\n", row)
-		} else {
-			fmt.Fprintf(screen, "%s%s%s\n",
-				fitCell(name, nameWidth),
-				gap,
-				coloredStatus(item.Running, statusWidth),
-			)
-		}
-	}
+	rows := buildTUIRows(workspaces, nil, nil)
 	if selected >= 0 && selected < len(workspaces) {
-		screen.WriteString("\n\x1b[2mVOLUME\x1b[0m\n")
-		screen.WriteString(truncateCell(workspaces[selected].Path, width))
+		selected = rowIndex(rows, workspaces[selected].Name)
 	}
-}
-
-func desiredNameWidth(workspaces []Workspace) int {
-	width := len([]rune("WORKSPACE"))
-	for _, item := range workspaces {
-		if itemWidth := len([]rune(item.Name)); itemWidth > width {
-			width = itemWidth
-		}
-	}
-	return width
-}
-
-func clamp(value, minimum, maximum int) int {
-	if value < minimum {
-		return minimum
-	}
-	if value > maximum {
-		return maximum
-	}
-	return value
-}
-
-func coloredStatus(running bool, width int) string {
-	text := statusText(running)
-	color := "\x1b[1;38;5;167m"
-	if running {
-		color = "\x1b[1;38;5;78m"
-	}
-	return color + fitCell(text, width) + "\x1b[0m"
-}
-
-func statusText(running bool) string {
-	if running {
-		return "RUNNING"
-	}
-	return "STOPPED"
-}
-
-func actionText(running bool) string {
-	if running {
-		return "ATTACH"
-	}
-	return "START"
-}
-
-func renderKeyBar(screen *strings.Builder, width int) {
-	type keyHint struct {
-		key   string
-		label string
-	}
-	hints := []keyHint{
-		{key: "J/K", label: "Move"},
-		{key: "Enter", label: "Open"},
-		{key: "S", label: "Stop"},
-		{key: "D", label: "Delete"},
-		{key: "R", label: "Refresh"},
-		{key: "Q", label: "Quit"},
-	}
-
-	used := 0
-	screen.WriteString("\x1b[38;5;240m")
-	screen.WriteString(strings.Repeat("─", width))
-	screen.WriteString("\x1b[0m\n")
-	for _, hint := range hints {
-		plainWidth := len([]rune(hint.key)) + len([]rune(hint.label)) + 4
-		if used+plainWidth > width {
-			break
-		}
-		fmt.Fprintf(screen, "\x1b[1;30;48;5;117m %s \x1b[0m \x1b[38;5;250m%s\x1b[0m ", hint.key, hint.label)
-		used += plainWidth
-	}
+	var frame strings.Builder
+	renderTUIView(&frame, tuiView{rows: rows, selected: selected, message: message, width: width, now: time.Now(), style: managerStyle(nil)})
+	fmt.Fprint(out, frame.String())
 }
 
 func printWorkspaces(out io.Writer, workspaces []Workspace) {
@@ -558,18 +496,29 @@ func terminalText(value string) string {
 	return out.String()
 }
 
-func renderDeleteConfirmation(out io.Writer, chosen Workspace, width int) {
+func renderDeleteConfirmation(out io.Writer, chosen tuiRow, width int, st tuiStyle) {
 	width = max(1, width-1)
 	fmt.Fprint(out, "\x1b[H\x1b[2J")
-	for _, line := range []string{
-		"DELETE WORKSPACE",
-		chosen.Name,
-		chosen.Path,
-		"Stops running container and proxy.",
-		"Container files: LOST.",
-		"Host project, traffic logs, saved logins: KEPT.",
-		"Y: delete; any other key: cancel",
-	} {
-		fmt.Fprintln(out, truncateCell(line, width))
+	lines := [][]span{
+		{{" Delete ", roleError}, {chosen.label, roleStrong}, {"?", roleError}},
+		nil,
+		{{"   lost  ", roleError}, {"container files, installed tools, running agents", roleText}},
+		{{"   kept  ", roleOK}, {"host project, traffic logs, saved agent logins", roleText}},
 	}
+	if chosen.task != nil {
+		lines = append(lines, []span{{"   kept  ", roleOK}, {"task clone; ", roleText}, {"agw task rm " + chosen.task.Name, roleAccent}, {" removes it after fetch", roleText}})
+	}
+	lines = append(lines, nil,
+		[]span{{"   container  ", roleDim}, {chosen.ws.Name, roleText}},
+		[]span{{"   path       ", roleDim}, {homeRelative(chosen.ws.Path), roleText}},
+		nil)
+	for _, line := range lines {
+		fmt.Fprintln(out, st.line(line, width))
+	}
+	if st.plain() {
+		fmt.Fprintln(out, st.line([]span{{" [y] delete   any other key: cancel", roleText}}, width))
+		return
+	}
+	fmt.Fprintln(out, st.line([]span{{" ", roleText}}, width)+st.paintWith(roleError, nil, true, "y")+" "+
+		st.role(roleDim, "delete")+"   "+st.role(roleDim, "any other key: cancel"))
 }
